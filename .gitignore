@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Cargo
+/.cargo/
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Runtime and logs
+*.log
+/tmp/
+
+# Env files
+.env
+.env.*
+
+# Local build/test artifacts
+artifacts/
