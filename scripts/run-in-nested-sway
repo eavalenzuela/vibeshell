@@ -3,10 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SWAY_CONFIG="${PROJECT_ROOT}/dev/sway.config"
 
 export GDK_BACKEND=wayland
 export GTK_USE_PORTAL=1
 export MOZ_ENABLE_WAYLAND=1
 
-exec sway -c "${SWAY_CONFIG}"
+exec "${PROJECT_ROOT}/scripts/start-sway-session"

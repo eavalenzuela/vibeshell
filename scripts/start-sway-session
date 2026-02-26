@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+SWAY_CONFIG="${VIBESHELL_SWAY_CONFIG:-${PROJECT_ROOT}/dev/sway.config}"
+SWAY_ONLY="${VIBESHELL_SWAY_ONLY:-0}"
+
+PANEL_CMD="${VIBESHELL_PANEL_CMD:-cargo run -p panel}"
+LAUNCHER_CMD="${VIBESHELL_LAUNCHER_CMD:-cargo run -p launcher}"
+NOTIFD_CMD="${VIBESHELL_NOTIFD_CMD:-cargo run -p notifd}"
+
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+  echo "XDG_RUNTIME_DIR is required to start Sway." >&2
+  exit 1
+fi
+
+mapfile -t PREEXISTING_WAYLAND_SOCKETS < <(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -type s -name 'wayland-*' -printf '%f\n' 2>/dev/null | sort)
+
+COMPONENT_PGIDS=()
+
+start_in_own_group() {
+  local cmd="$1"
+  setsid bash -lc "${cmd}" &
+  local pid=$!
+  COMPONENT_PGIDS+=("${pid}")
+}
+
+cleanup() {
+  trap - EXIT INT TERM
+
+  for pgid in "${COMPONENT_PGIDS[@]:-}"; do
+    kill -TERM -- "-${pgid}" 2>/dev/null || true
+  done
+
+  if [[ -n "${SWAY_PID:-}" ]] && kill -0 "${SWAY_PID}" 2>/dev/null; then
+    kill -TERM -- "${SWAY_PID}" 2>/dev/null || true
+  fi
+
+  for pgid in "${COMPONENT_PGIDS[@]:-}"; do
+    wait "${pgid}" 2>/dev/null || true
+  done
+
+  if [[ -n "${SWAY_PID:-}" ]]; then
+    wait "${SWAY_PID}" 2>/dev/null || true
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+setsid sway -c "${SWAY_CONFIG}" &
+SWAY_PID=$!
+
+for _ in $(seq 1 100); do
+  if ! kill -0 "${SWAY_PID}" 2>/dev/null; then
+    wait "${SWAY_PID}"
+    exit $?
+  fi
+
+  mapfile -t CURRENT_WAYLAND_SOCKETS < <(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -type s -name 'wayland-*' -printf '%f\n' 2>/dev/null | sort)
+  for sock in "${CURRENT_WAYLAND_SOCKETS[@]}"; do
+    if [[ ! " ${PREEXISTING_WAYLAND_SOCKETS[*]} " =~ " ${sock} " ]]; then
+      export WAYLAND_DISPLAY="${sock}"
+      break 2
+    fi
+  done
+
+  sleep 0.1
+done
+
+if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+  echo "Failed to determine nested WAYLAND_DISPLAY for Sway session." >&2
+  exit 1
+fi
+
+if [[ "${SWAY_ONLY}" != "1" ]]; then
+  start_in_own_group "${PANEL_CMD}"
+  start_in_own_group "${LAUNCHER_CMD}"
+  start_in_own_group "${NOTIFD_CMD}"
+fi
+
+wait "${SWAY_PID}"
+SWAY_STATUS=$?
+
+cleanup
+exit "${SWAY_STATUS}"
