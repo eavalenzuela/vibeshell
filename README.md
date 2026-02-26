@@ -111,6 +111,40 @@ just run-notifd
 
 ---
 
+
+## Logging
+
+All apps (`panel`, `launcher`, and `notifd`) use shared logging setup from `crates/common`.
+
+- Default level is `info`.
+- Set `VIBESHELL_LOG` to control verbosity (falls back to `RUST_LOG` if unset).
+- Logs include the `target` field, so output is tagged with the emitting component/module.
+
+Examples:
+
+```bash
+VIBESHELL_LOG=debug ./scripts/run-in-nested-sway
+```
+
+or, for very verbose tracing:
+
+```bash
+VIBESHELL_LOG=trace just run-nested
+```
+
+### Inspecting logs in nested Sway development
+
+The nested launcher script keeps child processes attached to the invoking terminal. During development:
+
+- Start nested Sway from a terminal and watch logs live there.
+- Optionally capture logs to a file:
+
+```bash
+VIBESHELL_LOG=debug ./scripts/run-in-nested-sway 2>&1 | tee /tmp/vibeshell-nested.log
+```
+
+- If you need to inspect after the run, open `/tmp/vibeshell-nested.log`.
+
 ## Useful development commands
 
 ```bash

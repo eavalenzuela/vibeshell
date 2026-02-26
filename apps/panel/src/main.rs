@@ -14,7 +14,7 @@ const PANEL_HEIGHT: i32 = 32;
 const RENDER_DEBOUNCE: Duration = Duration::from_millis(50);
 
 fn main() {
-    common::init_logging();
+    common::init_logging("panel");
     tracing::info!(app = "panel", "starting up");
 
     let app = adw::Application::builder()
