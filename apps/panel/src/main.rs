@@ -7,7 +7,7 @@ use adw::prelude::*;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
-use gtk4_layer_shell as layer_shell;
+use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use sway::{PanelState, PanelUpdate, WorkspaceState};
 
 const PANEL_HEIGHT: i32 = 32;
@@ -38,12 +38,12 @@ fn build_ui(app: &adw::Application) {
     window.set_resizable(false);
     window.set_size_request(-1, PANEL_HEIGHT);
 
-    layer_shell::init_for_window(&window);
-    layer_shell::set_layer(&window, layer_shell::Layer::Top);
-    layer_shell::set_anchor(&window, layer_shell::Edge::Top, true);
-    layer_shell::set_anchor(&window, layer_shell::Edge::Left, true);
-    layer_shell::set_anchor(&window, layer_shell::Edge::Right, true);
-    layer_shell::set_exclusive_zone(&window, PANEL_HEIGHT);
+    window.init_layer_shell();
+    window.set_layer(layer_shell::Layer::Top);
+    window.set_anchor(layer_shell::Edge::Top, true);
+    window.set_anchor(layer_shell::Edge::Left, true);
+    window.set_anchor(layer_shell::Edge::Right, true);
+    window.set_exclusive_zone(PANEL_HEIGHT);
 
     let workspaces = gtk::Label::new(Some(""));
     workspaces.set_halign(gtk::Align::Start);

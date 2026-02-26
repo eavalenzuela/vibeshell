@@ -10,7 +10,7 @@ use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
-use gtk4_layer_shell as layer_shell;
+use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use xdg::DesktopEntry;
 
 const MAX_RESULTS: usize = 10;
@@ -53,13 +53,13 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>) {
     window.set_decorated(false);
     window.set_resizable(false);
 
-    layer_shell::init_for_window(&window);
-    layer_shell::set_layer(&window, layer_shell::Layer::Overlay);
-    layer_shell::set_keyboard_mode(&window, layer_shell::KeyboardMode::Exclusive);
-    layer_shell::set_anchor(&window, layer_shell::Edge::Top, true);
-    layer_shell::set_anchor(&window, layer_shell::Edge::Bottom, true);
-    layer_shell::set_anchor(&window, layer_shell::Edge::Left, true);
-    layer_shell::set_anchor(&window, layer_shell::Edge::Right, true);
+    window.init_layer_shell();
+    window.set_layer(layer_shell::Layer::Overlay);
+    window.set_keyboard_mode(layer_shell::KeyboardMode::Exclusive);
+    window.set_anchor(layer_shell::Edge::Top, true);
+    window.set_anchor(layer_shell::Edge::Bottom, true);
+    window.set_anchor(layer_shell::Edge::Left, true);
+    window.set_anchor(layer_shell::Edge::Right, true);
 
     let panel = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
