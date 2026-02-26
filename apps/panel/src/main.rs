@@ -1,4 +1,7 @@
 use std::cell::RefCell;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
 use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
@@ -13,8 +16,26 @@ use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use sway::{PanelState, PanelUpdate, WorkspaceState};
 
 const RENDER_DEBOUNCE: Duration = Duration::from_millis(50);
+const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const SWAY_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const SWAY_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Debug)]
+struct PanelStatus {
+    volume: String,
+    wifi: String,
+    battery: String,
+}
+
+impl Default for PanelStatus {
+    fn default() -> Self {
+        Self {
+            volume: "vol N/A".to_owned(),
+            wifi: "wifi N/A".to_owned(),
+            battery: "bat N/A".to_owned(),
+        }
+    }
+}
 
 fn main() {
     common::init_logging("panel");
@@ -62,7 +83,21 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
         &Local::now().format(&panel_config.clock_format).to_string(),
     ));
     clock.set_halign(gtk::Align::End);
-    clock.set_margin_end(panel_config.margin_end);
+
+    let volume = gtk::Label::new(Some("🔊 vol 45%"));
+    let wifi = gtk::Label::new(Some("📶 wifi connected"));
+    let battery = gtk::Label::new(Some("🔋 bat 82%"));
+
+    let right_section = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .halign(gtk::Align::End)
+        .build();
+    right_section.set_margin_end(panel_config.margin_end);
+    right_section.append(&volume);
+    right_section.append(&wifi);
+    right_section.append(&battery);
+    right_section.append(&clock);
 
     let content = gtk::CenterBox::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -70,7 +105,7 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
         .build();
     content.set_start_widget(Some(&workspaces));
     content.set_center_widget(Some(&title));
-    content.set_end_widget(Some(&clock));
+    content.set_end_widget(Some(&right_section));
 
     window.set_content(Some(&content));
     window.present();
@@ -82,6 +117,8 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
     });
 
     let (sender, receiver) = glib::MainContext::channel::<PanelUpdate>(glib::Priority::DEFAULT);
+    let (status_sender, status_receiver) =
+        glib::MainContext::channel::<PanelStatus>(glib::Priority::DEFAULT);
 
     thread::spawn(move || {
         let mut backoff = SWAY_CONNECT_INITIAL_BACKOFF;
@@ -111,6 +148,29 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
 
             thread::sleep(backoff);
             backoff = (backoff * 2).min(SWAY_CONNECT_MAX_BACKOFF);
+        }
+    });
+
+    thread::spawn(move || {
+        let mut last_status = PanelStatus::default();
+
+        if status_sender.send(last_status.clone()).is_err() {
+            return;
+        }
+
+        loop {
+            let next_status = collect_status();
+            if next_status.volume != last_status.volume
+                || next_status.wifi != last_status.wifi
+                || next_status.battery != last_status.battery
+            {
+                if status_sender.send(next_status.clone()).is_err() {
+                    break;
+                }
+                last_status = next_status;
+            }
+
+            thread::sleep(STATUS_POLL_INTERVAL);
         }
     });
 
@@ -154,6 +214,13 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
         scheduled_render.replace(Some(source_id));
         glib::ControlFlow::Continue
     });
+
+    status_receiver.attach(None, move |status| {
+        volume.set_text(&format!("🔊 {}", status.volume));
+        wifi.set_text(&format!("📶 {}", status.wifi));
+        battery.set_text(&format!("🔋 {}", status.battery));
+        glib::ControlFlow::Continue
+    });
 }
 
 fn apply_state(workspaces_label: &gtk::Label, title_label: &gtk::Label, state: &PanelState) {
@@ -188,4 +255,69 @@ fn format_workspaces(workspaces: &[WorkspaceState]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn collect_status() -> PanelStatus {
+    PanelStatus {
+        volume: read_volume_status().unwrap_or_else(|| "vol N/A".to_owned()),
+        wifi: read_wifi_status().unwrap_or_else(|| "wifi N/A".to_owned()),
+        battery: read_battery_status().unwrap_or_else(|| "bat N/A".to_owned()),
+    }
+}
+
+fn read_volume_status() -> Option<String> {
+    let wpctl_output = run_command("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"])?.stdout;
+    let mut tokens = wpctl_output.split_whitespace();
+    let _label = tokens.next()?;
+    let value = tokens.next()?.parse::<f32>().ok()?;
+
+    Some(format!("vol {}%", (value * 100.0).round() as i32))
+}
+
+fn read_wifi_status() -> Option<String> {
+    let wifi_output = run_command("nmcli", &["-t", "-f", "WIFI", "g"])?;
+    let wifi_state = wifi_output.stdout.lines().next()?.trim().to_lowercase();
+
+    if wifi_state == "enabled" {
+        Some("wifi connected".to_owned())
+    } else {
+        Some("wifi disconnected".to_owned())
+    }
+}
+
+fn read_battery_status() -> Option<String> {
+    let entries = fs::read_dir("/sys/class/power_supply").ok()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name()?.to_str()?.to_owned();
+        if !name.starts_with("BAT") {
+            continue;
+        }
+
+        let capacity = read_trimmed(path.join("capacity"))?;
+        return Some(format!("bat {capacity}%"));
+    }
+
+    None
+}
+
+fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    Some(raw.trim().to_owned())
+}
+
+fn run_command(binary: &str, args: &[&str]) -> Option<CommandOutput> {
+    let output = Command::new(binary).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(CommandOutput {
+        stdout: String::from_utf8(output.stdout).ok()?,
+    })
+}
+
+struct CommandOutput {
+    stdout: String,
 }
