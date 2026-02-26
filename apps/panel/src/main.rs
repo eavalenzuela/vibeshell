@@ -1,16 +1,17 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use adw::prelude::*;
+use chrono::Local;
+use config::{Config, PanelConfig};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use sway::{PanelState, PanelUpdate, WorkspaceState};
 
-const PANEL_HEIGHT: i32 = 32;
 const RENDER_DEBOUNCE: Duration = Duration::from_millis(50);
 const SWAY_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const SWAY_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
@@ -19,46 +20,49 @@ fn main() {
     common::init_logging("panel");
     tracing::info!(app = "panel", "starting up");
 
+    let panel_config = Config::load().map(|cfg| cfg.panel).unwrap_or_else(|error| {
+        tracing::warn!(?error, "failed to load config, using defaults");
+        PanelConfig::default()
+    });
+
     let app = adw::Application::builder()
         .application_id("com.vibeshell.panel")
         .build();
 
-    app.connect_activate(build_ui);
+    app.connect_activate(move |app| build_ui(app, panel_config.clone()));
     app.run();
 }
 
-fn build_ui(app: &adw::Application) {
+fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("vibeshell-panel")
-        .default_height(PANEL_HEIGHT)
+        .default_height(panel_config.height)
         .build();
 
     window.set_decorated(false);
     window.set_resizable(false);
-    window.set_size_request(-1, PANEL_HEIGHT);
+    window.set_size_request(-1, panel_config.height);
 
     window.init_layer_shell();
     window.set_layer(layer_shell::Layer::Top);
     window.set_anchor(layer_shell::Edge::Top, true);
     window.set_anchor(layer_shell::Edge::Left, true);
     window.set_anchor(layer_shell::Edge::Right, true);
-    window.set_exclusive_zone(PANEL_HEIGHT);
+    window.set_exclusive_zone(panel_config.height);
 
     let workspaces = gtk::Label::new(Some(""));
     workspaces.set_halign(gtk::Align::Start);
-    workspaces.set_margin_start(12);
+    workspaces.set_margin_start(panel_config.margin_start);
 
     let title = gtk::Label::new(Some(""));
     title.set_halign(gtk::Align::Center);
 
-    let startup_seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-    let clock = gtk::Label::new(Some(&format!("clock: {startup_seconds}")));
+    let clock = gtk::Label::new(Some(
+        &Local::now().format(&panel_config.clock_format).to_string(),
+    ));
     clock.set_halign(gtk::Align::End);
-    clock.set_margin_end(12);
+    clock.set_margin_end(panel_config.margin_end);
 
     let content = gtk::CenterBox::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -70,6 +74,12 @@ fn build_ui(app: &adw::Application) {
 
     window.set_content(Some(&content));
     window.present();
+
+    let clock_format = panel_config.clock_format.clone();
+    glib::timeout_add_seconds_local(1, move || {
+        clock.set_text(&Local::now().format(&clock_format).to_string());
+        glib::ControlFlow::Continue
+    });
 
     let (sender, receiver) = glib::MainContext::channel::<PanelUpdate>(glib::Priority::DEFAULT);
 
@@ -177,5 +187,5 @@ fn format_workspaces(workspaces: &[WorkspaceState]) -> String {
             format!("{status}{display_name}{urgent}")
         })
         .collect::<Vec<_>>()
-        .join("  ")
+        .join(" ")
 }
