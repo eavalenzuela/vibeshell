@@ -212,8 +212,14 @@ fn install_css() {
         "#,
     );
 
+    let Some(display) = gtk::gdk::Display::default() else {
+        tracing::error!("no GTK display available; run notifd inside a Wayland session");
+        eprintln!("notifd: no display available. Run this inside a graphical Wayland session.");
+        return;
+    };
+
     gtk::style_context_add_provider_for_display(
-        &gtk::gdk::Display::default().expect("display should exist"),
+        &display,
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
@@ -233,7 +239,23 @@ fn spawn_dbus_service(sender: glib::Sender<UiEvent>) {
         };
 
         if let Err(error) = connection.request_name("org.freedesktop.Notifications") {
-            tracing::error!(?error, "failed to request bus name");
+            let details = error.to_string();
+            let likely_conflict = details.contains("NameExists")
+                || details.contains("NameTaken")
+                || details.contains("AlreadyOwner");
+
+            if likely_conflict {
+                tracing::error!(
+                    ?error,
+                    "failed to acquire org.freedesktop.Notifications; another notification daemon may already be running"
+                );
+                eprintln!(
+                    "notifd: org.freedesktop.Notifications is already owned. Stop the other notification daemon (for example mako/dunst) and retry."
+                );
+            } else {
+                tracing::error!(?error, "failed to request bus name");
+                eprintln!("notifd: failed to acquire org.freedesktop.Notifications on D-Bus.");
+            }
             return;
         }
 

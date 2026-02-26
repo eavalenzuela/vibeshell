@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::env;
 use std::process::Command;
 use std::rc::Rc;
+use std::thread;
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::gdk;
@@ -12,6 +14,8 @@ use gtk4_layer_shell as layer_shell;
 use xdg::DesktopEntry;
 
 const MAX_RESULTS: usize = 10;
+const SWAY_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+const SWAY_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct ScoredEntry {
@@ -27,6 +31,8 @@ fn main() {
         tracing::warn!(?error, "failed to read desktop entries");
         Vec::new()
     });
+
+    spawn_sway_dependency_probe();
 
     let app = adw::Application::builder()
         .application_id("com.vibeshell.launcher")
@@ -334,4 +340,33 @@ fn terminal_command() -> Vec<String> {
         .unwrap_or_else(|_| "foot".to_owned());
 
     shell_words::split(&configured).unwrap_or_else(|_| vec!["foot".to_owned()])
+}
+
+fn spawn_sway_dependency_probe() {
+    thread::spawn(|| {
+        let mut backoff = SWAY_CONNECT_INITIAL_BACKOFF;
+
+        loop {
+            match sway::SwayClient::connect() {
+                Ok(_) => {
+                    tracing::info!("launcher connected to sway ipc");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        retry_ms = backoff.as_millis(),
+                        "launcher could not connect to sway ipc; ensure sway is running and SWAYSOCK is set"
+                    );
+                    eprintln!(
+                        "launcher: sway IPC unavailable. Start sway first (or export SWAYSOCK), retrying in {} ms.",
+                        backoff.as_millis()
+                    );
+                }
+            }
+
+            thread::sleep(backoff);
+            backoff = (backoff * 2).min(SWAY_CONNECT_MAX_BACKOFF);
+        }
+    });
 }
