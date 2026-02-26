@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -8,7 +9,7 @@ use std::time::Duration;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
-use gtk4_layer_shell as layer_shell;
+use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use zbus::blocking::Connection;
 use zbus::interface;
 use zvariant::OwnedValue;
@@ -66,7 +67,7 @@ struct UiState {
 
 struct NotificationsService {
     next_id: Arc<AtomicU32>,
-    sender: glib::Sender<UiEvent>,
+    sender: mpsc::Sender<UiEvent>,
 }
 
 #[interface(name = "org.freedesktop.Notifications")]
@@ -157,12 +158,12 @@ fn build_ui(app: &gtk::Application) {
     window.set_decorated(false);
     window.set_resizable(false);
 
-    layer_shell::init_for_window(&window);
-    layer_shell::set_layer(&window, layer_shell::Layer::Overlay);
-    layer_shell::set_anchor(&window, layer_shell::Edge::Top, true);
-    layer_shell::set_anchor(&window, layer_shell::Edge::Right, true);
-    layer_shell::set_margin(&window, layer_shell::Edge::Top, 12);
-    layer_shell::set_margin(&window, layer_shell::Edge::Right, 12);
+    window.init_layer_shell();
+    window.set_layer(layer_shell::Layer::Overlay);
+    window.set_anchor(layer_shell::Edge::Top, true);
+    window.set_anchor(layer_shell::Edge::Right, true);
+    window.set_margin(layer_shell::Edge::Top, 12);
+    window.set_margin(layer_shell::Edge::Right, 12);
 
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -177,16 +178,19 @@ fn build_ui(app: &gtk::Application) {
     install_css();
     window.present();
 
-    let (sender, receiver) = glib::MainContext::channel::<UiEvent>(glib::Priority::DEFAULT);
+    let (sender, receiver) = mpsc::channel::<UiEvent>();
     spawn_dbus_service(sender);
 
     let state = Rc::new(std::cell::RefCell::new(UiState::default()));
 
-    receiver.attach(None, move |event| {
-        match event {
-            UiEvent::Notify(event) => add_card(&root, &state, event),
-            UiEvent::Close(id) => close_card(&state, id),
+    glib::timeout_add_local(Duration::from_millis(16), move || {
+        for event in receiver.try_iter() {
+            match event {
+                UiEvent::Notify(event) => add_card(&root, &state, event),
+                UiEvent::Close(id) => close_card(&state, id),
+            }
         }
+
         glib::ControlFlow::Continue
     });
 }
@@ -212,14 +216,20 @@ fn install_css() {
         "#,
     );
 
+    let Some(display) = gtk::gdk::Display::default() else {
+        tracing::error!("no GTK display available; run notifd inside a Wayland session");
+        eprintln!("notifd: no display available. Run this inside a graphical Wayland session.");
+        return;
+    };
+
     gtk::style_context_add_provider_for_display(
-        &gtk::gdk::Display::default().expect("display should exist"),
+        &display,
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 }
 
-fn spawn_dbus_service(sender: glib::Sender<UiEvent>) {
+fn spawn_dbus_service(sender: mpsc::Sender<UiEvent>) {
     thread::spawn(move || {
         let next_id = Arc::new(AtomicU32::new(1));
         let service = NotificationsService { next_id, sender };
@@ -233,7 +243,23 @@ fn spawn_dbus_service(sender: glib::Sender<UiEvent>) {
         };
 
         if let Err(error) = connection.request_name("org.freedesktop.Notifications") {
-            tracing::error!(?error, "failed to request bus name");
+            let details = error.to_string();
+            let likely_conflict = details.contains("NameExists")
+                || details.contains("NameTaken")
+                || details.contains("AlreadyOwner");
+
+            if likely_conflict {
+                tracing::error!(
+                    ?error,
+                    "failed to acquire org.freedesktop.Notifications; another notification daemon may already be running"
+                );
+                eprintln!(
+                    "notifd: org.freedesktop.Notifications is already owned. Stop the other notification daemon (for example mako/dunst) and retry."
+                );
+            } else {
+                tracing::error!(?error, "failed to request bus name");
+                eprintln!("notifd: failed to acquire org.freedesktop.Notifications on D-Bus.");
+            }
             return;
         }
 
@@ -247,10 +273,9 @@ fn spawn_dbus_service(sender: glib::Sender<UiEvent>) {
 
         tracing::info!("notification dbus interface ready");
 
+        // Keep the service connection alive for the process lifetime.
         loop {
-            if let Err(error) = connection.process(Duration::from_millis(250)) {
-                tracing::warn!(?error, "dbus process loop error");
-            }
+            thread::park_timeout(Duration::from_secs(60));
         }
     });
 }

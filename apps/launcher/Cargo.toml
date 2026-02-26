@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 common = { path = "../../crates/common" }
+sway = { path = "../../crates/sway" }
 xdg = { path = "../../crates/xdg" }
 tracing.workspace = true
 gtk4 = "0.8"
