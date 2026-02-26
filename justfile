@@ -15,3 +15,14 @@ run-launcher:
 
 run-notifd:
     cargo run -p notifd
+
+fmt:
+    cargo fmt --all
+
+clippy:
+    cargo clippy --workspace --all-targets -- -D warnings
+
+check:
+    cargo check --workspace
+
+ci: fmt clippy check
