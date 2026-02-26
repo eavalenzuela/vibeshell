@@ -65,7 +65,7 @@ sudo apt install -y \
 
 ### Option A: Run in a nested Sway session (recommended for development)
 
-This project includes a helper script that launches Sway with the project config:
+This project includes a helper script that runs the full session flow (Sway + `panel` + `launcher` + `notifd`) with process-group-aware shutdown:
 
 ```bash
 ./scripts/run-in-nested-sway
@@ -75,6 +75,20 @@ or via `just`:
 
 ```bash
 just run-nested
+```
+
+For display-manager style startup, use the same orchestration script directly:
+
+```bash
+./scripts/start-sway-session
+```
+
+To launch only Sway (without shell components) for debugging:
+
+```bash
+VIBESHELL_SWAY_ONLY=1 ./scripts/start-sway-session
+# or
+just run-session-sway-only
 ```
 
 ### Option B: Run components individually
