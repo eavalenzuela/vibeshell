@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -48,13 +49,24 @@ struct NotifyEvent {
     id: u32,
     summary: String,
     body: String,
-    timeout_ms: u64,
+    timeout_ms: Option<u64>,
     urgency: Urgency,
+}
+
+enum UiEvent {
+    Notify(NotifyEvent),
+    Close(u32),
+}
+
+#[derive(Default)]
+struct UiState {
+    cards: HashMap<u32, gtk::Box>,
+    generations: HashMap<u32, u64>,
 }
 
 struct NotificationsService {
     next_id: Arc<AtomicU32>,
-    sender: glib::Sender<NotifyEvent>,
+    sender: glib::Sender<UiEvent>,
 }
 
 #[interface(name = "org.freedesktop.Notifications")]
@@ -77,9 +89,11 @@ impl NotificationsService {
         };
 
         let timeout_ms = if expire_timeout > 0 {
-            expire_timeout as u64
+            Some(expire_timeout as u64)
+        } else if expire_timeout == 0 {
+            None
         } else {
-            DEFAULT_TIMEOUT_MS
+            Some(DEFAULT_TIMEOUT_MS)
         };
 
         let event = NotifyEvent {
@@ -90,7 +104,7 @@ impl NotificationsService {
             urgency: Urgency::from_hints(&hints),
         };
 
-        if let Err(error) = self.sender.send(event) {
+        if let Err(error) = self.sender.send(UiEvent::Notify(event)) {
             tracing::warn!(?error, "failed to deliver notification event to gtk thread");
         }
 
@@ -98,21 +112,24 @@ impl NotificationsService {
     }
 
     fn close_notification(&self, id: u32) {
-        tracing::debug!(
-            notification_id = id,
-            "CloseNotification not implemented in v0"
-        );
+        if let Err(error) = self.sender.send(UiEvent::Close(id)) {
+            tracing::warn!(?error, notification_id = id, "failed to close notification");
+        }
     }
 
     fn get_capabilities(&self) -> Vec<String> {
-        Vec::new()
+        vec![
+            "body".to_owned(),
+            "body-markup".to_owned(),
+            "icon-static".to_owned(),
+        ]
     }
 
     fn get_server_information(&self) -> (String, String, String, String) {
         (
             "vibeshell-notifd".to_owned(),
             "vibeshell".to_owned(),
-            "0.1.0".to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
             "1.2".to_owned(),
         )
     }
@@ -160,11 +177,16 @@ fn build_ui(app: &gtk::Application) {
     install_css();
     window.present();
 
-    let (sender, receiver) = glib::MainContext::channel::<NotifyEvent>(glib::Priority::DEFAULT);
+    let (sender, receiver) = glib::MainContext::channel::<UiEvent>(glib::Priority::DEFAULT);
     spawn_dbus_service(sender);
 
+    let state = Rc::new(std::cell::RefCell::new(UiState::default()));
+
     receiver.attach(None, move |event| {
-        add_card(&root, event);
+        match event {
+            UiEvent::Notify(event) => add_card(&root, &state, event),
+            UiEvent::Close(id) => close_card(&state, id),
+        }
         glib::ControlFlow::Continue
     });
 }
@@ -197,7 +219,7 @@ fn install_css() {
     );
 }
 
-fn spawn_dbus_service(sender: glib::Sender<NotifyEvent>) {
+fn spawn_dbus_service(sender: glib::Sender<UiEvent>) {
     thread::spawn(move || {
         let next_id = Arc::new(AtomicU32::new(1));
         let service = NotificationsService { next_id, sender };
@@ -233,7 +255,9 @@ fn spawn_dbus_service(sender: glib::Sender<NotifyEvent>) {
     });
 }
 
-fn add_card(root: &gtk::Box, event: NotifyEvent) {
+fn add_card(root: &gtk::Box, state: &Rc<std::cell::RefCell<UiState>>, event: NotifyEvent) {
+    close_card(state, event.id);
+
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
@@ -272,9 +296,18 @@ fn add_card(root: &gtk::Box, event: NotifyEvent) {
 
     root.prepend(&card);
 
-    let card_for_close = card.clone();
+    let generation = {
+        let mut state = state.borrow_mut();
+        state.cards.insert(event.id, card.clone());
+        let generation = state.generations.entry(event.id).or_insert(0);
+        *generation += 1;
+        *generation
+    };
+
+    let state_for_close = Rc::clone(state);
+    let id_for_close = event.id;
     close_button.connect_clicked(move |_| {
-        card_for_close.unparent();
+        close_card(&state_for_close, id_for_close);
     });
 
     tracing::debug!(
@@ -283,8 +316,33 @@ fn add_card(root: &gtk::Box, event: NotifyEvent) {
         "rendered notification"
     );
 
-    let card_for_timeout = card.clone();
-    glib::timeout_add_local_once(Duration::from_millis(event.timeout_ms), move || {
-        card_for_timeout.unparent();
-    });
+    if let Some(timeout_ms) = event.timeout_ms {
+        let state_for_timeout = Rc::clone(state);
+        let id_for_timeout = event.id;
+
+        glib::timeout_add_local_once(Duration::from_millis(timeout_ms), move || {
+            let current_generation = state_for_timeout
+                .borrow()
+                .generations
+                .get(&id_for_timeout)
+                .copied();
+
+            if current_generation == Some(generation) {
+                close_card(&state_for_timeout, id_for_timeout);
+            }
+        });
+    }
+}
+
+fn close_card(state: &Rc<std::cell::RefCell<UiState>>, id: u32) {
+    let card = {
+        let mut state = state.borrow_mut();
+        state.generations.remove(&id);
+        state.cards.remove(&id)
+    };
+
+    if let Some(card) = card {
+        card.unparent();
+        tracing::debug!(notification_id = id, "closed notification");
+    }
 }
