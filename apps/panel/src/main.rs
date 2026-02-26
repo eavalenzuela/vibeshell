@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,6 +11,7 @@ use gtk4_layer_shell as layer_shell;
 use sway::{PanelState, PanelUpdate, WorkspaceState};
 
 const PANEL_HEIGHT: i32 = 32;
+const RENDER_DEBOUNCE: Duration = Duration::from_millis(50);
 
 fn main() {
     common::init_logging();
@@ -79,9 +82,44 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
+    let latest_state = Rc::new(RefCell::new(None::<PanelState>));
+    let scheduled_render = Rc::new(RefCell::new(None::<glib::SourceId>));
+    let last_rendered = Rc::new(RefCell::new(None::<PanelState>));
+
     receiver.attach(None, move |update| {
         let PanelUpdate::Snapshot(state) = update;
-        apply_state(&workspaces, &title, &state);
+        latest_state.replace(Some(state));
+
+        if scheduled_render.borrow().is_some() {
+            return glib::ControlFlow::Continue;
+        }
+
+        let latest_state = Rc::clone(&latest_state);
+        let scheduled_render = Rc::clone(&scheduled_render);
+        let last_rendered = Rc::clone(&last_rendered);
+        let workspaces = workspaces.clone();
+        let title = title.clone();
+
+        let source_id = glib::timeout_add_local_once(RENDER_DEBOUNCE, move || {
+            scheduled_render.borrow_mut().take();
+
+            let Some(next_state) = latest_state.borrow_mut().take() else {
+                return;
+            };
+
+            if last_rendered
+                .borrow()
+                .as_ref()
+                .is_some_and(|rendered| rendered == &next_state)
+            {
+                return;
+            }
+
+            apply_state(&workspaces, &title, &next_state);
+            last_rendered.replace(Some(next_state));
+        });
+
+        scheduled_render.replace(Some(source_id));
         glib::ControlFlow::Continue
     });
 }
@@ -105,11 +143,16 @@ fn format_workspaces(workspaces: &[WorkspaceState]) -> String {
                 .map(|num| num.to_string())
                 .unwrap_or_else(|| workspace.name.clone());
 
-            if workspace.focused {
-                format!("●{display_name}")
+            let status = if workspace.focused {
+                '●'
+            } else if workspace.visible {
+                '◉'
             } else {
-                format!("○{display_name}")
-            }
+                '○'
+            };
+
+            let urgent = if workspace.urgent { "!" } else { "" };
+            format!("{status}{display_name}{urgent}")
         })
         .collect::<Vec<_>>()
         .join("  ")
