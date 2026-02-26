@@ -11,3 +11,6 @@ gtk4 = "0.8"
 gtk4-layer-shell = "0.3"
 zbus = "4"
 zvariant = "4"
+
+[lints]
+workspace = true
