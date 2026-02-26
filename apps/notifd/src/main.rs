@@ -136,7 +136,7 @@ impl NotificationsService {
 }
 
 fn main() {
-    common::init_logging();
+    common::init_logging("notifd");
     tracing::info!(app = "notifd", "starting up");
 
     let app = gtk::Application::builder()

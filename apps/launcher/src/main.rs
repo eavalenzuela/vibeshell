@@ -20,7 +20,7 @@ struct ScoredEntry {
 }
 
 fn main() {
-    common::init_logging();
+    common::init_logging("launcher");
     tracing::info!(app = "launcher", "starting up");
 
     let apps = xdg::discover_applications().unwrap_or_else(|error| {
