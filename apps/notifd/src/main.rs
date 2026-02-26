@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use config::{Config, NotifdConfig};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -13,9 +14,6 @@ use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use zbus::blocking::Connection;
 use zbus::interface;
 use zvariant::OwnedValue;
-
-const DEFAULT_TIMEOUT_MS: u64 = 5_000;
-const WINDOW_WIDTH: i32 = 360;
 
 #[derive(Clone, Copy)]
 enum Urgency {
@@ -68,6 +66,7 @@ struct UiState {
 struct NotificationsService {
     next_id: Arc<AtomicU32>,
     sender: mpsc::Sender<UiEvent>,
+    default_timeout_ms: u64,
 }
 
 #[interface(name = "org.freedesktop.Notifications")]
@@ -94,7 +93,7 @@ impl NotificationsService {
         } else if expire_timeout == 0 {
             None
         } else {
-            Some(DEFAULT_TIMEOUT_MS)
+            Some(self.default_timeout_ms)
         };
 
         let event = NotifyEvent {
@@ -140,19 +139,26 @@ fn main() {
     common::init_logging("notifd");
     tracing::info!(app = "notifd", "starting up");
 
+    let notifd_config = Config::load()
+        .map(|cfg| cfg.notifd)
+        .unwrap_or_else(|error| {
+            tracing::warn!(?error, "failed to load config, using defaults");
+            NotifdConfig::default()
+        });
+
     let app = gtk::Application::builder()
         .application_id("com.vibeshell.notifd")
         .build();
 
-    app.connect_activate(build_ui);
+    app.connect_activate(move |app| build_ui(app, notifd_config.clone()));
     app.run();
 }
 
-fn build_ui(app: &gtk::Application) {
+fn build_ui(app: &gtk::Application, notifd_config: NotifdConfig) {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("vibeshell-notifd")
-        .default_width(WINDOW_WIDTH)
+        .default_width(notifd_config.width)
         .build();
 
     window.set_decorated(false);
@@ -162,8 +168,8 @@ fn build_ui(app: &gtk::Application) {
     window.set_layer(layer_shell::Layer::Overlay);
     window.set_anchor(layer_shell::Edge::Top, true);
     window.set_anchor(layer_shell::Edge::Right, true);
-    window.set_margin(layer_shell::Edge::Top, 12);
-    window.set_margin(layer_shell::Edge::Right, 12);
+    window.set_margin(layer_shell::Edge::Top, notifd_config.margin_top);
+    window.set_margin(layer_shell::Edge::Right, notifd_config.margin_right);
 
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -179,7 +185,7 @@ fn build_ui(app: &gtk::Application) {
     window.present();
 
     let (sender, receiver) = mpsc::channel::<UiEvent>();
-    spawn_dbus_service(sender);
+    spawn_dbus_service(sender, notifd_config.default_timeout_ms);
 
     let state = Rc::new(std::cell::RefCell::new(UiState::default()));
 
@@ -229,10 +235,14 @@ fn install_css() {
     );
 }
 
-fn spawn_dbus_service(sender: mpsc::Sender<UiEvent>) {
+fn spawn_dbus_service(sender: mpsc::Sender<UiEvent>, default_timeout_ms: u64) {
     thread::spawn(move || {
         let next_id = Arc::new(AtomicU32::new(1));
-        let service = NotificationsService { next_id, sender };
+        let service = NotificationsService {
+            next_id,
+            sender,
+            default_timeout_ms,
+        };
 
         let connection = match Connection::session() {
             Ok(connection) => connection,

@@ -1,11 +1,11 @@
 use std::cell::RefCell;
-use std::env;
 use std::process::Command;
 use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 
 use adw::prelude::*;
+use config::{Config, LauncherConfig};
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
@@ -13,7 +13,6 @@ use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use xdg::DesktopEntry;
 
-const MAX_RESULTS: usize = 10;
 const SWAY_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const SWAY_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
 
@@ -27,6 +26,13 @@ fn main() {
     common::init_logging("launcher");
     tracing::info!(app = "launcher", "starting up");
 
+    let launcher_config = Config::load()
+        .map(|cfg| cfg.launcher)
+        .unwrap_or_else(|error| {
+            tracing::warn!(?error, "failed to load config, using defaults");
+            LauncherConfig::default()
+        });
+
     let apps = xdg::discover_applications().unwrap_or_else(|error| {
         tracing::warn!(?error, "failed to read desktop entries");
         Vec::new()
@@ -38,16 +44,16 @@ fn main() {
         .application_id("com.vibeshell.launcher")
         .build();
 
-    app.connect_activate(move |app| build_ui(app, apps.clone()));
+    app.connect_activate(move |app| build_ui(app, apps.clone(), launcher_config.clone()));
     app.run();
 }
 
-fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>) {
+fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: LauncherConfig) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("vibeshell-launcher")
-        .default_width(640)
-        .default_height(420)
+        .default_width(launcher_config.window_width)
+        .default_height(launcher_config.window_height)
         .build();
 
     window.set_decorated(false);
@@ -91,9 +97,10 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>) {
         let apps = apps.clone();
         let list = list.clone();
         let state = state.clone();
+        let max_results = launcher_config.max_results;
         input.connect_changed(move |entry| {
             let query = entry.text().to_string();
-            let ranked = rank_entries(&apps, &query);
+            let ranked = rank_entries(&apps, &query, max_results);
             populate_results(&list, &state, &ranked);
         });
     }
@@ -102,8 +109,9 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>) {
         let window = window.clone();
         let input = input.clone();
         let state = state.clone();
+        let terminal_command = launcher_config.terminal_command.clone();
         input.connect_activate(move |_| {
-            if launch_selected(&state.borrow(), 0).is_ok() {
+            if launch_selected(&state.borrow(), 0, &terminal_command).is_ok() {
                 window.close();
             }
         });
@@ -113,6 +121,7 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>) {
         let window = window.clone();
         let list = list.clone();
         let state = state.clone();
+        let terminal_command = launcher_config.terminal_command.clone();
         let key_controller = gtk::EventControllerKey::new();
         key_controller.connect_key_pressed(move |_, key, _, _| match key {
             gdk::Key::Escape => {
@@ -129,7 +138,7 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>) {
             }
             gdk::Key::Return => {
                 let index = selected_index(&list).unwrap_or(0);
-                if launch_selected(&state.borrow(), index).is_ok() {
+                if launch_selected(&state.borrow(), index, &terminal_command).is_ok() {
                     window.close();
                 }
                 glib::Propagation::Stop
@@ -142,21 +151,26 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>) {
     {
         let window = window.clone();
         let state = state.clone();
+        let terminal_command = launcher_config.terminal_command.clone();
         list.connect_row_activated(move |_, row| {
             let index = row.index() as usize;
-            if launch_selected(&state.borrow(), index).is_ok() {
+            if launch_selected(&state.borrow(), index, &terminal_command).is_ok() {
                 window.close();
             }
         });
     }
 
-    populate_results(&list, &state, &rank_entries(&apps, ""));
+    populate_results(
+        &list,
+        &state,
+        &rank_entries(&apps, "", launcher_config.max_results),
+    );
 
     window.present();
     input.grab_focus();
 }
 
-fn rank_entries(entries: &[DesktopEntry], query: &str) -> Vec<ScoredEntry> {
+fn rank_entries(entries: &[DesktopEntry], query: &str, max_results: usize) -> Vec<ScoredEntry> {
     let normalized_query = query.trim().to_lowercase();
 
     let mut ranked: Vec<_> = entries
@@ -175,7 +189,7 @@ fn rank_entries(entries: &[DesktopEntry], query: &str) -> Vec<ScoredEntry> {
             .cmp(&a.score)
             .then_with(|| a.entry.name.cmp(&b.entry.name))
     });
-    ranked.truncate(MAX_RESULTS);
+    ranked.truncate(max_results);
     ranked
 }
 
@@ -271,7 +285,11 @@ fn move_selection(list: &gtk::ListBox, direction: i32) {
     }
 }
 
-fn launch_selected(entries: &[ScoredEntry], index: usize) -> Result<(), String> {
+fn launch_selected(
+    entries: &[ScoredEntry],
+    index: usize,
+    terminal_command: &str,
+) -> Result<(), String> {
     let Some(selected) = entries.get(index) else {
         return Err("no selection".to_owned());
     };
@@ -280,7 +298,7 @@ fn launch_selected(entries: &[ScoredEntry], index: usize) -> Result<(), String> 
     tracing::info!(entry = selected.entry.name, ?cmd, "launching desktop entry");
 
     if selected.entry.terminal {
-        let terminal = terminal_command();
+        let terminal = parse_terminal_command(terminal_command);
         let mut command = Command::new(&terminal[0]);
         command
             .args(&terminal[1..])
@@ -334,12 +352,13 @@ fn expand_exec_token(token: &str, entry: &DesktopEntry) -> String {
     out
 }
 
-fn terminal_command() -> Vec<String> {
-    let configured = env::var("VIBESHELL_TERMINAL_CMD")
-        .or_else(|_| env::var("TERMINAL"))
-        .unwrap_or_else(|_| "foot".to_owned());
-
-    shell_words::split(&configured).unwrap_or_else(|_| vec!["foot".to_owned()])
+fn parse_terminal_command(configured: &str) -> Vec<String> {
+    let parsed = shell_words::split(configured).unwrap_or_else(|_| vec!["foot".to_owned()]);
+    if parsed.is_empty() {
+        vec!["foot".to_owned()]
+    } else {
+        parsed
+    }
 }
 
 fn spawn_sway_dependency_probe() {
