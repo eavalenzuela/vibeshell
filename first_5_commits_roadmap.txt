@@ -1,0 +1,196 @@
+Recommended GTK+Rust stack (v0-friendly)
+
+UI toolkit: gtk4 crate + libadwaita (adw) for clean widgets and layout patterns.
+
+Layer-shell: gtk4-layer-shell (panel/launcher/notifications need it).
+
+Sway IPC: swayipc crate (or i3ipc-compatible crates; Sway supports i3 IPC).
+
+D-Bus: zbus (notifications + future settings/power integration).
+
+Async runtime: tokio or glib async; common pattern is GTK main loop + spawn async tasks with channels back to UI.
+
+A strong v0 pattern is: UI is GTK main thread, everything else (IPC, D-Bus, polling) runs async and sends updates via channels to the UI.
+
+Concrete v0 architecture (processes + crates)
+Processes
+
+your-shell-panel (GTK layer-shell, top bar)
+
+your-shell-launcher (GTK layer-shell overlay, app search)
+
+your-shell-notifd (D-Bus service + GTK popup renderer)
+Optionally merge (1) and (3) later, but keeping notifd separate is simpler operationally.
+
+Shared crates (workspace)
+
+crates/config (TOML config + schema + defaults)
+
+crates/sway (IPC client, event stream, normalized types)
+
+crates/xdg (desktop entry parsing + icons)
+
+crates/common (logging, channels, small utilities)
+
+Repo layout:
+
+apps/panel/
+
+apps/launcher/
+
+apps/notifd/
+
+crates/...
+
+GTK+Rust v0 task list (tailored)
+0) Workspace + build system
+
+ Cargo workspace with apps + shared crates
+
+ Structured logging (tracing + tracing-subscriber)
+
+ justfile or make targets:
+
+just run-nested (nested Sway session for dev)
+
+just run-panel, just run-launcher, etc.
+
+1) Nested dev harness (saves tons of time)
+
+ Script: start nested Sway (WLR_BACKENDS=headless or sway -c ... inside a Wayland session)
+
+ Export env vars for toolkit sanity:
+
+GDK_BACKEND=wayland
+
+GTK_USE_PORTAL=1
+
+MOZ_ENABLE_WAYLAND=1
+
+ Provide a minimal Sway config that binds keys to your binaries
+
+2) Panel v0 (GTK layer-shell)
+
+ Create a layer-shell window anchored top, full width
+
+ Set exclusive_zone so app windows don’t overlap
+
+ Add widgets:
+
+workspace list
+
+focused title
+
+clock
+
+ Implement Sway state:
+
+get_workspaces on startup
+
+subscribe to workspace and window events
+
+update UI via glib::MainContext channel
+
+3) Launcher v0 (overlay)
+
+ Layer-shell overlay window centered
+
+ Desktop entry indexing:
+
+scan XDG app dirs
+
+keep name/exec/icon keywords
+
+ Fuzzy match (simple starts-with / contains first; add better scoring later)
+
+ Execute selected entry (respect Terminal=true, Exec field expansions)
+
+ Keybindings in Sway config:
+
+Super+Space opens launcher
+
+Esc closes
+
+4) Notifications v0 (zbus + GTK popups)
+
+ Implement org.freedesktop.Notifications via zbus
+
+ Render notification popups using a layer-shell window on top-right
+
+ Stack notifications with timeout + close button
+
+ Support basic hints (urgency, expire-time) minimally
+
+5) Config v0 (TOML + reload)
+
+ Define config.toml with:
+
+panel height, font, spacing
+
+launcher width, max results
+
+preferred terminal
+
+ Add SIGHUP/your-shellctl reload to reload config
+
+ Config version field to allow future migrations
+
+6) “Desktop plumbing” integrations (v0 essentials)
+
+ Start a polkit agent (ship a small GTK agent later; for now exec an existing one if installed)
+
+ Document portal requirements (xdg-desktop-portal, xdg-desktop-portal-wlr)
+
+ Provide volume/brightness commands (configurable):
+
+PipeWire: wpctl set-volume ...
+
+Brightness: brightnessctl set ...
+
+7) Packaging + session entry
+
+ your-shell.desktop (Wayland session) + launcher script
+
+ Optional: systemd user units for panel/launcher/notifd with restart policies
+
+ Install rules (meson/cargo-install or distro packaging later)
+
+“Required features” definition (GTK+Rust flavored)
+
+- Panel appears reliably on login (layer-shell + exclusive zone correct)
+
+- Workspace switching + active workspace indicator correct
+
+- Launcher finds and launches apps from .desktop entries
+
+- Notifications work for common apps (browser, chat, etc.)
+
+- A documented and reproducible setup path (Sway config include + session script)
+
+- Logs you can point bug reporters to (journalctl or log files)
+
+Important considerations specific to GTK+Rust + Wayland
+
+- GTK thread model: all GTK calls on main thread only. Use channels to pass updates in.
+
+- Layer-shell quirks: test on multi-monitor; anchoring and exclusive zone can behave differently with different outputs.
+
+- Icons and theming: icon lookup can be weird at first; lean on gtk::IconTheme + XDG icon search paths.
+
+- Sway IPC event volume: window tree updates can be frequent; debounce UI updates.
+
+- Flatpak apps: portal setup matters; set GTK_USE_PORTAL=1 in session env.
+
+- NVIDIA: expect reports. Document what you support; don’t debug forever in v0.
+
+Suggested first 5 commits
+
+1. Cargo workspace + logging + nested Sway dev script
+
+2. Panel window using gtk4-layer-shell (static clock only)
+
+3. Sway IPC workspaces + focused title wired into panel
+
+4. Launcher overlay + .desktop scanning + run app
+
+5. Notifications D-Bus stub + popup rendering (no actions yet)
