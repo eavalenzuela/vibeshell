@@ -43,6 +43,23 @@ enum Commands {
         #[arg(long)]
         pretty: bool,
     },
+    /// Send an IPC request to vibeshell and print the JSON response.
+    Ipc {
+        #[command(subcommand)]
+        command: IpcCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IpcCommands {
+    /// Read state via GetState IPC.
+    GetState {
+        /// Pretty-print JSON for humans.
+        #[arg(long)]
+        pretty: bool,
+    },
+    /// Activate/select a cluster via SetZoom IPC.
+    ActivateCluster { cluster: ClusterId },
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -133,6 +150,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Logs { component } => logs(component)?,
         Commands::Logout => logout()?,
         Commands::DumpState { pretty } => dump_state(pretty)?,
+        Commands::Ipc { command } => ipc(command)?,
+    }
+
+    Ok(())
+}
+
+fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
+    let (request, pretty) = match command {
+        IpcCommands::GetState { pretty } => (IpcRequest::GetState, pretty),
+        IpcCommands::ActivateCluster { cluster } => (
+            IpcRequest::SetZoom {
+                level: ZoomLevel::Cluster(cluster),
+            },
+            false,
+        ),
+    };
+
+    let response = dispatch_ipc_request(request)?;
+    if pretty {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", serde_json::to_string(&response)?);
+    }
+    Ok(())
+}
+
+fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error>> {
+    match request {
+        IpcRequest::GetState => {
+            let state = build_canvas_state_from_sway()?;
+            Ok(IpcResponse::State(state))
+        }
+        IpcRequest::SetZoom {
+            level: ZoomLevel::Cluster(cluster_id),
+        } => match activate_cluster(cluster_id) {
+            Ok(()) => Ok(IpcResponse::Ack),
+            Err(error) => Ok(IpcResponse::Error {
+                message: error.to_string(),
+            }),
+        },
+        unsupported => Ok(IpcResponse::Error {
+            message: format!("unsupported ipc request: {unsupported:?}"),
+        }),
+    }
+}
+
+fn activate_cluster(cluster_id: ClusterId) -> Result<(), Box<dyn std::error::Error>> {
+    let mut connection = Connection::new()?;
+    let workspaces = connection.get_workspaces()?;
+    let workspace = workspaces
+        .into_iter()
+        .find(|workspace| workspace.id as ClusterId == cluster_id)
+        .ok_or_else(|| format!("cluster {cluster_id} not found"))?;
+
+    let command = if workspace.num >= 0 {
+        format!("workspace number {}", workspace.num)
+    } else {
+        let escaped = workspace.name.replace('"', "\\\"");
+        format!("workspace \"{escaped}\"")
+    };
+
+    for reply in connection.run_command(&command)? {
+        if let Err(error) = reply {
+            return Err(format!("sway rejected activation command `{command}`: {error}").into());
+        }
     }
 
     Ok(())
@@ -268,10 +350,70 @@ fn logs(component: Component) -> Result<(), Box<dyn std::error::Error>> {
 
 fn dump_state(pretty: bool) -> Result<(), Box<dyn std::error::Error>> {
     log_ipc_request(IpcRequestType::GetState, "daemon-snapshot", None, None);
-
-    let mut connection = Connection::new()?;
     let events = ingest_sway_event_metadata()?;
+    let state = build_canvas_state_from_sway()?;
 
+    let active_cluster = state
+        .windows
+        .iter()
+        .find(|window| matches!(state.zoom, ZoomLevel::Focus(id) if id == window.id))
+        .and_then(|window| window.cluster_id)
+        .or_else(|| state.clusters.first().map(|cluster| cluster.id));
+    let active_zoom = state.zoom.clone();
+    let output = state.output.clone();
+    let viewport = state.viewport.clone();
+
+    let mut state = state;
+    state.clusters.sort_by_key(|cluster| cluster.id);
+    state.windows.sort_by_key(|window| window.id);
+
+    let mut clusters_with_windows: Vec<ClusterDump> = state
+        .clusters
+        .iter()
+        .map(|cluster| {
+            let mut window_ids: Vec<WindowId> = state
+                .windows
+                .iter()
+                .filter(|window| window.cluster_id == Some(cluster.id))
+                .map(|window| window.id)
+                .collect();
+            window_ids.sort_unstable();
+
+            ClusterDump {
+                id: cluster.id,
+                name: cluster.name.clone(),
+                x: cluster.x,
+                y: cluster.y,
+                window_ids,
+            }
+        })
+        .collect();
+    clusters_with_windows.sort_by_key(|cluster| cluster.id);
+
+    let dump = DumpState {
+        active_zoom,
+        active_cluster,
+        clusters: clusters_with_windows,
+        windows: state.windows.clone(),
+        output_viewport: OutputViewport { output, viewport },
+    };
+
+    let response = IpcResponse::State(state);
+    log_ipc_response(
+        &response,
+        "daemon-snapshot",
+        events.windows,
+        events.workspaces,
+    );
+
+    let rendered = render_dump_state_json(&dump, pretty)?;
+    println!("{rendered}");
+
+    Ok(())
+}
+
+fn build_canvas_state_from_sway() -> Result<CanvasState, Box<dyn std::error::Error>> {
+    let mut connection = Connection::new()?;
     let tree = connection.get_tree()?;
     let outputs = connection.get_outputs()?;
     let workspaces = connection.get_workspaces()?;
@@ -297,6 +439,9 @@ fn dump_state(pretty: bool) -> Result<(), Box<dyn std::error::Error>> {
                 x: workspace.rect.x as f64,
                 y: workspace.rect.y as f64,
                 enabled: workspace.visible,
+                windows: Vec::new(),
+                last_focus: None,
+                recency: Vec::new(),
             },
         );
     }
@@ -373,59 +518,13 @@ fn dump_state(pretty: bool) -> Result<(), Box<dyn std::error::Error>> {
         "output+viewport",
     );
 
-    let mut state = CanvasState {
-        zoom: active_zoom.clone(),
-        viewport: viewport.clone(),
+    Ok(CanvasState {
+        zoom: active_zoom,
+        viewport,
         clusters: clusters.values().cloned().collect(),
-        windows: windows.clone(),
-        output: output.clone(),
-    };
-    state.clusters.sort_by_key(|cluster| cluster.id);
-    state.windows.sort_by_key(|window| window.id);
-
-    let mut clusters_with_windows: Vec<ClusterDump> = state
-        .clusters
-        .iter()
-        .map(|cluster| {
-            let mut window_ids: Vec<WindowId> = state
-                .windows
-                .iter()
-                .filter(|window| window.cluster_id == Some(cluster.id))
-                .map(|window| window.id)
-                .collect();
-            window_ids.sort_unstable();
-
-            ClusterDump {
-                id: cluster.id,
-                name: cluster.name.clone(),
-                x: cluster.x,
-                y: cluster.y,
-                window_ids,
-            }
-        })
-        .collect();
-    clusters_with_windows.sort_by_key(|cluster| cluster.id);
-
-    let dump = DumpState {
-        active_zoom,
-        active_cluster,
-        clusters: clusters_with_windows,
-        windows: state.windows.clone(),
-        output_viewport: OutputViewport { output, viewport },
-    };
-
-    let response = IpcResponse::State(state);
-    log_ipc_response(
-        &response,
-        "daemon-snapshot",
-        events.windows,
-        events.workspaces,
-    );
-
-    let rendered = render_dump_state_json(&dump, pretty)?;
-    println!("{rendered}");
-
-    Ok(())
+        windows,
+        output,
+    })
 }
 
 fn render_dump_state_json(dump: &DumpState, pretty: bool) -> Result<String, serde_json::Error> {
@@ -679,6 +778,9 @@ mod tests {
                 x: 1.0,
                 y: 2.0,
                 enabled: true,
+                windows: vec![101],
+                last_focus: Some(101),
+                recency: vec![101],
             }],
             windows: vec![Window {
                 id: 101,
