@@ -10,6 +10,7 @@ use common::contracts::{
     CanvasState, Cluster, ClusterId, IpcRequest, IpcResponse, OutputState, Viewport, Window,
     WindowId, WindowRole, WindowState, ZoomLevel,
 };
+use common::model::{CanvasModel, OpenAssignPolicy};
 use serde::Serialize;
 use tracing::{info, warn};
 
@@ -371,13 +372,12 @@ fn dump_state(pretty: bool) -> Result<(), Box<dyn std::error::Error>> {
         .clusters
         .iter()
         .map(|cluster| {
-            let mut window_ids: Vec<WindowId> = state
-                .windows
-                .iter()
-                .filter(|window| window.cluster_id == Some(cluster.id))
-                .map(|window| window.id)
-                .collect();
-            window_ids.sort_unstable();
+            let mut window_ids = cluster.recency.clone();
+            for &window_id in &cluster.windows {
+                if !window_ids.contains(&window_id) {
+                    window_ids.push(window_id);
+                }
+            }
 
             ClusterDump {
                 id: cluster.id,
@@ -448,6 +448,7 @@ fn build_canvas_state_from_sway() -> Result<CanvasState, Box<dyn std::error::Err
 
     let mut windows = Vec::new();
     collect_windows_from_tree(&tree, None, &mut windows);
+    windows.sort_by_key(|window| window.id);
 
     for window in &windows {
         log_model_mutation(
@@ -458,23 +459,49 @@ fn build_canvas_state_from_sway() -> Result<CanvasState, Box<dyn std::error::Err
         );
     }
 
-    let focused_window = windows.iter().find(|window| {
-        matches!(window.state, WindowState::Fullscreen) || window.title.contains("[focused]")
-    });
+    let focused_window_id = windows
+        .iter()
+        .find(|window| {
+            matches!(window.state, WindowState::Fullscreen) || window.title.contains("[focused]")
+        })
+        .map(|window| window.id);
 
-    let active_cluster = focused_window
-        .and_then(|window| window.cluster_id)
-        .or_else(|| clusters.keys().next().copied());
+    let fallback_cluster = clusters.keys().next().copied();
+    let mut model = CanvasModel::new(
+        CanvasState {
+            zoom: ZoomLevel::Overview,
+            viewport: Viewport::default(),
+            clusters: clusters.values().cloned().collect(),
+            windows: Vec::new(),
+            output: OutputState::default(),
+        },
+        fallback_cluster.unwrap_or_default(),
+    )
+    .map_err(|error| format!("unable to initialize daemon model from sway snapshot: {error:?}"))?;
+
+    for mut window in windows {
+        let assigned_cluster = window.cluster_id.or(fallback_cluster);
+        if let Some(cluster_id) = assigned_cluster {
+            window.cluster_id = Some(cluster_id);
+            let _ = model.on_window_open(window, OpenAssignPolicy::FallbackCluster(cluster_id));
+        }
+    }
+
+    if let Some(window_id) = focused_window_id {
+        let _ = model.on_focus_change(window_id);
+    }
+
+    let active_cluster = Some(model.active_cluster());
 
     log_model_mutation(
         ModelMutation::SelectActiveCluster,
         active_cluster,
-        focused_window.map(|window| window.id),
-        "derived",
+        focused_window_id,
+        "model-focus",
     );
 
-    let active_zoom = if let Some(window) = focused_window {
-        ZoomLevel::Focus(window.id)
+    let active_zoom = if let Some(window_id) = focused_window_id {
+        ZoomLevel::Focus(window_id)
     } else if let Some(cluster_id) = active_cluster {
         ZoomLevel::Cluster(cluster_id)
     } else {
@@ -484,7 +511,7 @@ fn build_canvas_state_from_sway() -> Result<CanvasState, Box<dyn std::error::Err
     log_model_mutation(
         ModelMutation::SyncZoom,
         active_cluster,
-        focused_window.map(|window| window.id),
+        focused_window_id,
         "derived",
     );
 
@@ -514,17 +541,15 @@ fn build_canvas_state_from_sway() -> Result<CanvasState, Box<dyn std::error::Err
     log_model_mutation(
         ModelMutation::UpdateOutputViewport,
         active_cluster,
-        focused_window.map(|window| window.id),
+        focused_window_id,
         "output+viewport",
     );
 
-    Ok(CanvasState {
-        zoom: active_zoom,
-        viewport,
-        clusters: clusters.values().cloned().collect(),
-        windows,
-        output,
-    })
+    let mut state = model.state().clone();
+    state.zoom = active_zoom;
+    state.viewport = viewport;
+    state.output = output;
+    Ok(state)
 }
 
 fn render_dump_state_json(dump: &DumpState, pretty: bool) -> Result<String, serde_json::Error> {

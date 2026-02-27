@@ -541,12 +541,13 @@ fn ensure_cluster_metadata_defaults(state: &mut CanvasState) {
         cluster
             .recency
             .retain(|window_id| unique.contains(window_id));
+        for &window_id in cluster.windows.iter().rev() {
+            if !cluster.recency.contains(&window_id) {
+                cluster.recency.push(window_id);
+            }
+        }
         if cluster.last_focus.is_none() {
-            cluster.last_focus = cluster
-                .recency
-                .first()
-                .copied()
-                .or_else(|| cluster.windows.last().copied());
+            cluster.last_focus = cluster.recency.first().copied();
         }
     }
 }
@@ -671,6 +672,142 @@ mod tests {
         assert!(destination.recency.is_empty());
     }
 
+    #[test]
+    fn focus_changes_update_recency_without_reordering_unfocused_windows() {
+        let mut state = base_state();
+        state.clusters[0].windows = vec![10, 11, 12];
+        state.clusters[0].recency = vec![10, 11, 12];
+        state.clusters[0].last_focus = Some(10);
+        state.windows.extend([
+            Window {
+                id: 11,
+                title: "Editor".into(),
+                app_id: Some("code".into()),
+                class: Some("code".into()),
+                role: WindowRole::Normal,
+                state: WindowState::Tiled,
+                cluster_id: Some(1),
+                transient_for: None,
+                manual_cluster_override: false,
+                manual_position_override: false,
+            },
+            Window {
+                id: 12,
+                title: "Browser".into(),
+                app_id: Some("firefox".into()),
+                class: Some("firefox".into()),
+                role: WindowRole::Normal,
+                state: WindowState::Tiled,
+                cluster_id: Some(1),
+                transient_for: None,
+                manual_cluster_override: false,
+                manual_position_override: false,
+            },
+        ]);
+
+        let mut model = CanvasModel::new(state, 1).expect("valid model");
+
+        let first = model
+            .on_focus_change(12)
+            .expect("focus update should succeed");
+        assert_eq!(
+            first,
+            MutationResult::FocusUpdated {
+                window: 12,
+                cluster: 1,
+            }
+        );
+
+        let cluster = model
+            .state()
+            .clusters
+            .iter()
+            .find(|cluster| cluster.id == 1)
+            .expect("cluster exists");
+        assert_eq!(cluster.last_focus, Some(12));
+        assert_eq!(cluster.recency, vec![12, 10, 11]);
+
+        let second = model
+            .on_focus_change(11)
+            .expect("focus update should succeed");
+        assert_eq!(
+            second,
+            MutationResult::FocusUpdated {
+                window: 11,
+                cluster: 1,
+            }
+        );
+        let cluster = model
+            .state()
+            .clusters
+            .iter()
+            .find(|cluster| cluster.id == 1)
+            .expect("cluster exists");
+        assert_eq!(cluster.last_focus, Some(11));
+        assert_eq!(cluster.recency, vec![11, 12, 10]);
+    }
+
+    #[test]
+    fn metadata_defaults_seed_deterministic_recency_for_existing_windows() {
+        let state = CanvasState {
+            zoom: ZoomLevel::Cluster(1),
+            viewport: Viewport::default(),
+            clusters: vec![Cluster {
+                id: 1,
+                name: "one".into(),
+                x: 0.0,
+                y: 0.0,
+                enabled: true,
+                windows: vec![20, 10, 30],
+                last_focus: None,
+                recency: vec![],
+            }],
+            windows: vec![
+                Window {
+                    id: 10,
+                    title: "A".into(),
+                    app_id: None,
+                    class: None,
+                    role: WindowRole::Normal,
+                    state: WindowState::Tiled,
+                    cluster_id: Some(1),
+                    transient_for: None,
+                    manual_cluster_override: false,
+                    manual_position_override: false,
+                },
+                Window {
+                    id: 20,
+                    title: "B".into(),
+                    app_id: None,
+                    class: None,
+                    role: WindowRole::Normal,
+                    state: WindowState::Tiled,
+                    cluster_id: Some(1),
+                    transient_for: None,
+                    manual_cluster_override: false,
+                    manual_position_override: false,
+                },
+                Window {
+                    id: 30,
+                    title: "C".into(),
+                    app_id: None,
+                    class: None,
+                    role: WindowRole::Normal,
+                    state: WindowState::Tiled,
+                    cluster_id: Some(1),
+                    transient_for: None,
+                    manual_cluster_override: false,
+                    manual_position_override: false,
+                },
+            ],
+            output: OutputState::default(),
+        };
+
+        let model = CanvasModel::new(state, 1).expect("valid model");
+        let cluster = model.state().clusters.first().expect("cluster exists");
+        assert_eq!(cluster.recency, vec![30, 10, 20]);
+        assert_eq!(cluster.last_focus, Some(30));
+    }
     #[test]
     fn manual_assignment_is_idempotent() {
         let mut model = CanvasModel::new(base_state(), 1).expect("valid model");
