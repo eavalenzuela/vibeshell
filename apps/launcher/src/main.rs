@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use adw::prelude::*;
-use config::{Config, LauncherConfig};
+use config::Config;
 use gtk::gdk;
 use gtk::glib;
 use gtk4 as gtk;
@@ -72,11 +72,11 @@ fn main() {
     tracing::info!(app = "launcher", "starting up");
 
     let launcher_config = Config::load()
-        .map(|cfg| cfg.launcher)
         .unwrap_or_else(|error| {
             tracing::warn!(?error, "failed to load config, using defaults");
-            LauncherConfig::default()
-        });
+            Config::default()
+        })
+        .launcher;
 
     let apps = xdg::discover_applications().unwrap_or_else(|error| {
         tracing::warn!(?error, "failed to read desktop entries");

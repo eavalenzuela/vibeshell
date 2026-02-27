@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use config::{Config, NotifdConfig};
+use config::{Config, NotificationsConfig};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -180,11 +180,11 @@ fn main() {
     tracing::info!(app = "notifd", "starting up");
 
     let notifd_config = Config::load()
-        .map(|cfg| cfg.notifd)
         .unwrap_or_else(|error| {
             tracing::warn!(?error, "failed to load config, using defaults");
-            NotifdConfig::default()
-        });
+            Config::default()
+        })
+        .notifications;
 
     let (_, reload_rx) = common::spawn_reload_listener();
 
@@ -198,7 +198,7 @@ fn main() {
 
 fn build_ui(
     app: &gtk::Application,
-    notifd_config: NotifdConfig,
+    notifd_config: NotificationsConfig,
     reload_rx: mpsc::Receiver<common::ReloadReason>,
 ) {
     let window = gtk::ApplicationWindow::builder()
@@ -265,7 +265,7 @@ fn build_ui(
         while let Ok(reason) = reload_rx.try_recv() {
             match Config::load() {
                 Ok(config) => {
-                    let next = config.notifd;
+                    let next = config.notifications;
                     let mut applied = Vec::new();
                     let mut restart_required = Vec::new();
 

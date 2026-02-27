@@ -10,7 +10,7 @@ mod status;
 
 use adw::prelude::*;
 use chrono::Local;
-use config::{Config, PanelConfig};
+use config::{CommandsConfig, Config, PanelConfig};
 use gtk::glib;
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
@@ -26,15 +26,15 @@ struct RuntimePanelConfig {
     power_menu_command: String,
 }
 
-impl From<&PanelConfig> for RuntimePanelConfig {
-    fn from(value: &PanelConfig) -> Self {
+impl RuntimePanelConfig {
+    fn from_sections(panel: &PanelConfig, commands: &CommandsConfig) -> Self {
         Self {
-            clock_format: value.clock_format.clone(),
-            status_poll_interval_ms: value.status_poll_interval_ms,
-            audio_toggle_command: value.audio_toggle_command.clone(),
-            audio_mixer_command: value.audio_mixer_command.clone(),
-            network_settings_command: value.network_settings_command.clone(),
-            power_menu_command: value.power_menu_command.clone(),
+            clock_format: panel.clock_format.clone(),
+            status_poll_interval_ms: panel.status_poll_interval_ms,
+            audio_toggle_command: commands.volume.toggle_mute.clone(),
+            audio_mixer_command: commands.volume.mixer.clone(),
+            network_settings_command: panel.network_settings_command.clone(),
+            power_menu_command: commands.power.menu.clone(),
         }
     }
 }
@@ -48,10 +48,12 @@ fn main() {
     common::init_logging("panel");
     tracing::info!(app = "panel", "starting up");
 
-    let panel_config = Config::load().map(|cfg| cfg.panel).unwrap_or_else(|error| {
+    let loaded = Config::load().unwrap_or_else(|error| {
         tracing::warn!(?error, "failed to load config, using defaults");
-        PanelConfig::default()
+        Config::default()
     });
+    let panel_config = loaded.panel.clone();
+    let runtime_panel_config = RuntimePanelConfig::from_sections(&loaded.panel, &loaded.commands);
 
     let (_, reload_rx) = common::spawn_reload_listener();
 
@@ -59,13 +61,21 @@ fn main() {
         .application_id("com.vibeshell.panel")
         .build();
 
-    app.connect_activate(move |app| build_ui(app, panel_config.clone(), reload_rx));
+    app.connect_activate(move |app| {
+        build_ui(
+            app,
+            panel_config.clone(),
+            runtime_panel_config.clone(),
+            reload_rx,
+        )
+    });
     app.run();
 }
 
 fn build_ui(
     app: &adw::Application,
     panel_config: PanelConfig,
+    initial_runtime_config: RuntimePanelConfig,
     reload_rx: mpsc::Receiver<common::ReloadReason>,
 ) {
     let window = adw::ApplicationWindow::builder()
@@ -76,7 +86,7 @@ fn build_ui(
 
     window.set_size_request(-1, panel_config.height);
 
-    let runtime_config = Arc::new(Mutex::new(RuntimePanelConfig::from(&panel_config)));
+    let runtime_config = Arc::new(Mutex::new(initial_runtime_config));
 
     if layer_shell::is_supported() {
         window.set_decorated(false);
@@ -343,7 +353,7 @@ fn build_ui(
                         .lock()
                         .expect("runtime config poisoned")
                         .clone();
-                    let next = RuntimePanelConfig::from(&config.panel);
+                    let next = RuntimePanelConfig::from_sections(&config.panel, &config.commands);
 
                     let mut applied = Vec::new();
                     let mut restart_required = Vec::new();
