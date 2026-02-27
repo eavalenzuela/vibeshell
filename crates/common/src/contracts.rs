@@ -33,6 +33,9 @@ pub struct Cluster {
     pub x: f64,
     pub y: f64,
     pub enabled: bool,
+    pub windows: Vec<WindowId>,
+    pub last_focus: Option<WindowId>,
+    pub recency: Vec<WindowId>,
 }
 
 impl Default for Cluster {
@@ -43,6 +46,9 @@ impl Default for Cluster {
             x: 0.0,
             y: 0.0,
             enabled: true,
+            windows: Vec::new(),
+            last_focus: None,
+            recency: Vec::new(),
         }
     }
 }
@@ -199,6 +205,9 @@ mod tests {
                 x: 1.0,
                 y: 2.0,
                 enabled: true,
+                windows: vec![100],
+                last_focus: Some(100),
+                recency: vec![100],
             }],
             windows: vec![Window {
                 id: 100,
