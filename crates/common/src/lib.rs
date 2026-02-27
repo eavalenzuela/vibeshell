@@ -1,5 +1,6 @@
 pub mod contracts;
 pub mod model;
+pub mod persistence;
 
 use std::sync::mpsc;
 use std::sync::Once;

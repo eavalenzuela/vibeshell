@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use common::contracts::{
     CanvasState, Cluster, ClusterId, ContextStripDirection, OutputState, Viewport, Window,
     WindowId, WindowRole, WindowState, ZoomLevel,
 };
+use common::persistence::{OverviewPersistence, PersistedOverviewState};
 use serde::Serialize;
 use serde_json::json;
 use swayipc::Connection;
@@ -47,19 +49,30 @@ pub enum MutationType {
     CycleContextStrip,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StateOwner {
     canvas_state: CanvasState,
     selected_cluster_id: Option<ClusterId>,
     focus_freeze: FocusFreezeMetadata,
+    persistence: OverviewPersistence,
+    boot_persisted: Option<PersistedOverviewState>,
 }
 
 impl StateOwner {
     pub fn new() -> Self {
+        let mut canvas_state = CanvasState::default();
+        let persistence = OverviewPersistence::with_debounce(Duration::from_millis(250));
+        let boot_persisted = persistence.load().ok().flatten();
+        if let Some(persisted) = &boot_persisted {
+            persisted.apply_to_canvas_seed(&mut canvas_state);
+        }
+
         Self {
-            canvas_state: CanvasState::default(),
+            canvas_state,
             selected_cluster_id: None,
             focus_freeze: FocusFreezeMetadata::default(),
+            persistence,
+            boot_persisted,
         }
     }
 
@@ -73,6 +86,7 @@ impl StateOwner {
 
     pub fn ingest_sway_facts(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
         let snapshot = sway_snapshot()?;
         let mut outcome = ConflictOutcome::None;
 
@@ -97,6 +111,9 @@ impl StateOwner {
         self.canvas_state.windows = snapshot.windows;
         self.canvas_state.output = snapshot.output;
         self.canvas_state.viewport = previous_viewport;
+        if let Some(persisted) = &self.boot_persisted {
+            persisted.merge_into_live_canvas(&mut self.canvas_state);
+        }
         if self.canvas_state.viewport != Viewport::default() {
             outcome = ConflictOutcome::PreservedViewport;
         }
@@ -129,6 +146,7 @@ impl StateOwner {
             }
         }
 
+        self.persist_after_mutation(&previous_state);
         self.bump_revision(prior, MutationType::SwayIngest, outcome);
         Ok(())
     }
@@ -341,6 +359,32 @@ impl StateOwner {
         Ok(target)
     }
 
+    pub fn flush_pending_persistence(&mut self) {
+        if let Err(error) = self.persistence.flush_pending() {
+            tracing::warn!(?error, "failed to flush pending persisted overview state");
+        }
+    }
+
+    fn persist_after_mutation(&mut self, previous: &CanvasState) {
+        let changed_positions = cluster_position_or_metadata_changed(previous, &self.canvas_state);
+        let changed_assignments = window_assignment_changed(previous, &self.canvas_state);
+        let changed_viewport = previous.viewport != self.canvas_state.viewport;
+
+        if changed_positions || changed_assignments {
+            if let Err(error) = self.persistence.persist_immediate(&self.canvas_state) {
+                tracing::warn!(?error, path=?self.persistence.path(), "failed to persist overview state immediately");
+            }
+            return;
+        }
+
+        if changed_viewport {
+            self.persistence.persist_debounced(&self.canvas_state);
+            if let Err(error) = self.persistence.flush_due() {
+                tracing::warn!(?error, path=?self.persistence.path(), "failed to flush debounced overview state");
+            }
+        }
+    }
+
     fn bump_revision(&mut self, prior: u64, mutation: MutationType, conflict: ConflictOutcome) {
         self.canvas_state.state_revision = prior.saturating_add(1);
         let next = self.canvas_state.state_revision;
@@ -355,6 +399,44 @@ impl StateOwner {
             "deterministic mutation log"
         );
     }
+}
+
+fn cluster_position_or_metadata_changed(previous: &CanvasState, next: &CanvasState) -> bool {
+    let previous_clusters = previous
+        .clusters
+        .iter()
+        .map(|cluster| (cluster.id, (&cluster.name, cluster.x, cluster.y)))
+        .collect::<BTreeMap<_, _>>();
+    let next_clusters = next
+        .clusters
+        .iter()
+        .map(|cluster| (cluster.id, (&cluster.name, cluster.x, cluster.y)))
+        .collect::<BTreeMap<_, _>>();
+    previous_clusters != next_clusters
+}
+
+fn window_assignment_changed(previous: &CanvasState, next: &CanvasState) -> bool {
+    let previous_assignments = previous
+        .windows
+        .iter()
+        .map(|window| {
+            (
+                window.id,
+                (window.cluster_id, window.manual_cluster_override),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let next_assignments = next
+        .windows
+        .iter()
+        .map(|window| {
+            (
+                window.id,
+                (window.cluster_id, window.manual_cluster_override),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    previous_assignments != next_assignments
 }
 
 struct SwaySnapshot {
