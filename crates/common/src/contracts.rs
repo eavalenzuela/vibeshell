@@ -6,6 +6,7 @@ pub type ClusterId = u64;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CanvasState {
+    pub state_revision: u64,
     pub zoom: ZoomLevel,
     pub viewport: Viewport,
     pub clusters: Vec<Cluster>,
@@ -16,6 +17,7 @@ pub struct CanvasState {
 impl Default for CanvasState {
     fn default() -> Self {
         Self {
+            state_revision: 0,
             zoom: ZoomLevel::default(),
             viewport: Viewport::default(),
             clusters: Vec::new(),
@@ -171,6 +173,41 @@ pub enum IpcRequest {
         dx: f64,
         dy: f64,
     },
+    SelectCluster {
+        cluster: ClusterId,
+    },
+    BeginClusterDrag {
+        cluster: ClusterId,
+        pointer_canvas_x: f64,
+        pointer_canvas_y: f64,
+        base_revision: u64,
+    },
+    UpdateClusterDrag {
+        pointer_canvas_x: f64,
+        pointer_canvas_y: f64,
+    },
+    CommitClusterDrag,
+    CancelClusterDrag,
+    OverviewPan {
+        dx: f64,
+        dy: f64,
+        output: Option<String>,
+    },
+    OverviewZoom {
+        delta: f64,
+        anchor_canvas_x: f64,
+        anchor_canvas_y: f64,
+        output: Option<String>,
+    },
+    EnterKeyboardMoveMode {
+        cluster: ClusterId,
+    },
+    KeyboardMoveBy {
+        dx: f64,
+        dy: f64,
+    },
+    CommitKeyboardMove,
+    CancelKeyboardMove,
     CreateCluster {
         name: String,
         x: f64,
@@ -199,8 +236,17 @@ pub enum ContextStripDirection {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcResponse {
     Ack,
+    ClusterDragAck {
+        state_revision: u64,
+    },
     State(CanvasState),
-    Error { message: String },
+    ClusterDragError {
+        message: String,
+        state_revision: u64,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -210,6 +256,7 @@ mod tests {
     #[test]
     fn round_trip_state_fixture() {
         let fixture = CanvasState {
+            state_revision: 9,
             zoom: ZoomLevel::Cluster(7),
             viewport: Viewport {
                 x: 42.0,
@@ -288,6 +335,62 @@ mod tests {
         ] {
             let json = serde_json::to_string(&fixture).expect("serialize request");
             let parsed: IpcRequest = serde_json::from_str(&json).expect("parse request");
+            assert_eq!(parsed, fixture);
+        }
+    }
+
+    #[test]
+    fn round_trip_ipc_overview_interaction_requests() {
+        for fixture in [
+            IpcRequest::SelectCluster { cluster: 7 },
+            IpcRequest::BeginClusterDrag {
+                cluster: 7,
+                pointer_canvas_x: 123.0,
+                pointer_canvas_y: 456.0,
+                base_revision: 8,
+            },
+            IpcRequest::UpdateClusterDrag {
+                pointer_canvas_x: 130.0,
+                pointer_canvas_y: 460.0,
+            },
+            IpcRequest::CommitClusterDrag,
+            IpcRequest::CancelClusterDrag,
+            IpcRequest::OverviewPan {
+                dx: 15.0,
+                dy: -2.5,
+                output: Some("HDMI-A-1".to_owned()),
+            },
+            IpcRequest::OverviewZoom {
+                delta: -1.0,
+                anchor_canvas_x: 12.5,
+                anchor_canvas_y: 20.0,
+                output: Some("DP-1".to_owned()),
+            },
+            IpcRequest::EnterKeyboardMoveMode { cluster: 7 },
+            IpcRequest::KeyboardMoveBy {
+                dx: -20.0,
+                dy: 40.0,
+            },
+            IpcRequest::CommitKeyboardMove,
+            IpcRequest::CancelKeyboardMove,
+        ] {
+            let json = serde_json::to_string(&fixture).expect("serialize request");
+            let parsed: IpcRequest = serde_json::from_str(&json).expect("parse request");
+            assert_eq!(parsed, fixture);
+        }
+    }
+
+    #[test]
+    fn round_trip_ipc_overview_interaction_responses() {
+        for fixture in [
+            IpcResponse::ClusterDragAck { state_revision: 11 },
+            IpcResponse::ClusterDragError {
+                message: "stale base revision".to_owned(),
+                state_revision: 12,
+            },
+        ] {
+            let json = serde_json::to_string(&fixture).expect("serialize response");
+            let parsed: IpcResponse = serde_json::from_str(&json).expect("parse response");
             assert_eq!(parsed, fixture);
         }
     }

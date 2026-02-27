@@ -559,6 +559,7 @@ mod tests {
 
     fn base_state() -> CanvasState {
         CanvasState {
+            state_revision: 0,
             zoom: ZoomLevel::Cluster(1),
             viewport: Viewport::default(),
             clusters: vec![
@@ -750,6 +751,7 @@ mod tests {
     #[test]
     fn metadata_defaults_seed_deterministic_recency_for_existing_windows() {
         let state = CanvasState {
+            state_revision: 0,
             zoom: ZoomLevel::Cluster(1),
             viewport: Viewport::default(),
             clusters: vec![Cluster {
