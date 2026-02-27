@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -10,7 +11,6 @@ use adw::prelude::*;
 use chrono::Local;
 use config::{Config, PanelConfig};
 use gtk::glib;
-use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use sway::{PanelState, PanelUpdate, WorkspaceState};
@@ -116,9 +116,8 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
         glib::ControlFlow::Continue
     });
 
-    let (sender, receiver) = glib::MainContext::channel::<PanelUpdate>(glib::Priority::DEFAULT);
-    let (status_sender, status_receiver) =
-        glib::MainContext::channel::<PanelStatus>(glib::Priority::DEFAULT);
+    let (sender, receiver) = mpsc::channel::<PanelUpdate>();
+    let (status_sender, status_receiver) = mpsc::channel::<PanelStatus>();
 
     thread::spawn(move || {
         let mut backoff = SWAY_CONNECT_INITIAL_BACKOFF;
@@ -178,47 +177,53 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
     let scheduled_render = Rc::new(RefCell::new(None::<glib::SourceId>));
     let last_rendered = Rc::new(RefCell::new(None::<PanelState>));
 
-    receiver.attach(None, move |update| {
-        let PanelUpdate::Snapshot(state) = update;
-        latest_state.replace(Some(state));
+    glib::timeout_add_local(Duration::from_millis(16), move || {
+        while let Ok(update) = receiver.try_recv() {
+            let PanelUpdate::Snapshot(state) = update;
+            latest_state.replace(Some(state));
 
-        if scheduled_render.borrow().is_some() {
-            return glib::ControlFlow::Continue;
-        }
-
-        let latest_state = Rc::clone(&latest_state);
-        let scheduled_render = Rc::clone(&scheduled_render);
-        let last_rendered = Rc::clone(&last_rendered);
-        let workspaces = workspaces.clone();
-        let title = title.clone();
-
-        let source_id = glib::timeout_add_local_once(RENDER_DEBOUNCE, move || {
-            scheduled_render.borrow_mut().take();
-
-            let Some(next_state) = latest_state.borrow_mut().take() else {
-                return;
-            };
-
-            if last_rendered
-                .borrow()
-                .as_ref()
-                .is_some_and(|rendered| rendered == &next_state)
-            {
-                return;
+            if scheduled_render.borrow().is_some() {
+                continue;
             }
 
-            apply_state(&workspaces, &title, &next_state);
-            last_rendered.replace(Some(next_state));
-        });
+            let latest_state = Rc::clone(&latest_state);
+            let scheduled_render = Rc::clone(&scheduled_render);
+            let last_rendered = Rc::clone(&last_rendered);
+            let workspaces = workspaces.clone();
+            let title = title.clone();
 
-        scheduled_render.replace(Some(source_id));
+            let source_id = glib::timeout_add_local_once(RENDER_DEBOUNCE, move || {
+                scheduled_render.borrow_mut().take();
+
+                let Some(next_state) = latest_state.borrow_mut().take() else {
+                    return;
+                };
+
+                if last_rendered
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|rendered| rendered == &next_state)
+                {
+                    return;
+                }
+
+                apply_state(&workspaces, &title, &next_state);
+                last_rendered.replace(Some(next_state));
+            });
+
+            scheduled_render.replace(Some(source_id));
+        }
+
         glib::ControlFlow::Continue
     });
 
-    status_receiver.attach(None, move |status| {
-        volume.set_text(&format!("🔊 {}", status.volume));
-        wifi.set_text(&format!("📶 {}", status.wifi));
-        battery.set_text(&format!("🔋 {}", status.battery));
+    glib::timeout_add_local(Duration::from_millis(250), move || {
+        while let Ok(status) = status_receiver.try_recv() {
+            volume.set_text(&format!("🔊 {}", status.volume));
+            wifi.set_text(&format!("📶 {}", status.wifi));
+            battery.set_text(&format!("🔋 {}", status.battery));
+        }
+
         glib::ControlFlow::Continue
     });
 }

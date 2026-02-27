@@ -8,7 +8,6 @@ use adw::prelude::*;
 use config::{Config, LauncherConfig};
 use gtk::gdk;
 use gtk::glib;
-use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use xdg::DesktopEntry;
