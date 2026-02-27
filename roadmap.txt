@@ -339,6 +339,92 @@ drag clusters around
 
 Add “snap-to” and inertial feel later (optional)
 
+Phase 4 Interaction Spec
+
+State machine
+
+OverviewIdle -> OverviewPanning when Mod+PointerMiddleDrag, Mod+PointerLeftDrag on empty canvas, or Mod+Arrow key repeat starts.
+
+OverviewIdle -> OverviewSelecting when PointerLeftClick lands on a cluster card.
+
+OverviewSelecting -> ClusterZoom when Enter is pressed (selected cluster) or PointerLeftDoubleClick hits the same cluster.
+
+OverviewIdle/OverviewSelecting/OverviewPanning -> ClusterZoom when Mod+Enter is pressed and a cluster is selected.
+
+Overview* -> PreviousZoom when Esc is pressed with no active drag and no modal UI open.
+
+OverviewDraggingCluster -> OverviewIdle when PointerLeftRelease commits, Enter commits, or Esc cancels and restores pre-drag position.
+
+Pan/zoom controls (overview)
+
+Keyboard pan: Mod+Arrow pans by 96 px per keypress, 384 px with Shift.
+
+Keyboard zoom: Mod+Plus and Mod+Minus adjust overview scale by 12% steps around viewport center.
+
+Pointer pan: hold Mod and drag empty canvas with PointerLeft, or drag with PointerMiddle without modifiers.
+
+Pointer zoom: Mod+WheelUp/Down (or Ctrl+Wheel on touchpads) zooms around pointer anchor.
+
+Clamp zoom scale to [0.35, 2.50]; clamp viewport center after each pan/zoom to visible canvas bounds.
+
+Selection behavior
+
+Single click on cluster card: selects cluster, does not change zoom level, and updates focus ring.
+
+Double click on selected cluster card: enters Cluster zoom for that cluster.
+
+Enter: if cluster selected in Overview, dive into that cluster (same as double click).
+
+Esc behavior priority: cancel drag preview -> close transient overlay panels -> return to previous zoom level.
+
+If no selection exists, Enter is a no-op and should emit a lightweight hint in overlay status text.
+
+Drag lifecycle
+
+Drag start threshold: 8 px pointer movement from press point before card enters dragging state.
+
+Live preview: card follows pointer in overlay space; connected edges/nearby snap guides render in preview layer only.
+
+Snap preview: show target ghost position when within 24 px of grid line, neighboring card centerline, or output work-area center.
+
+Commit keys: PointerLeftRelease or Enter commits cluster position and writes to in-memory model.
+
+Cancel keys: Esc or PointerRightClick during drag cancels and restores original position.
+
+Accessibility and keyboard-only fallback
+
+Keyboard move mode: select cluster, press M to enter move mode, Arrow keys move by 32 px (Shift for 128 px).
+
+In move mode, Tab cycles snap candidates; Space toggles snap on/off; Enter commits; Esc cancels.
+
+Announce move-mode state, current coordinates, and snap target via accessibility status channel.
+
+All drag outcomes (commit/cancel/snap) must be reachable without pointer input.
+
+Focus handoff rules
+
+Entering Overview: save currently focused window id, move input focus to overlay root, and set window focus freeze flag.
+
+While in Overview, window tree focus must not change unless user explicitly dives into cluster/focus mode.
+
+Leaving Overview via dive: hand focus to cluster's last_focus window, else first tiled window, else workspace container.
+
+Leaving Overview via Esc/back: restore saved pre-overview window focus if it still exists, else fallback to active cluster last_focus.
+
+On overlay dismissal, clear focus freeze flag after backend confirms focus command applied.
+
+Multi-output and viewport edge handling
+
+Maintain per-output overview viewport origin/scale; pan/zoom affects only focused output unless "link outputs" is enabled.
+
+When pointer crosses output boundary during pan/drag, continue interaction in global canvas space but clamp previews to each output work area.
+
+If selected cluster is outside current output bounds after zoom, animate viewport recenter to nearest visible point on that output.
+
+Never place cluster card commit position outside global canvas min/max bounds; if exceeded, project to nearest valid point.
+
+On output hotplug/remove during Overview, remap viewport to primary output and preserve relative cluster coordinates.
+
 Exit criteria: you can navigate primarily from overview without remembering numbers.
 
 Phase 5 — Persistence + robustness (make it daily-drivable)
