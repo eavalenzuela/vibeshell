@@ -16,7 +16,50 @@ pub struct Rect {
 pub struct ClusterLayoutInput {
     pub cluster_id: ClusterId,
     pub area: Rect,
+    /// Canonical cluster-local order (persistent model order), not WM tree order.
     pub windows: Vec<WindowId>,
+    /// Fallback ordering key for windows not present in `windows`.
+    pub first_seen_at: HashMap<WindowId, u64>,
+}
+
+fn canonical_cluster_window_order(cluster: &ClusterLayoutInput) -> Vec<WindowId> {
+    let mut explicit = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for &window_id in &cluster.windows {
+        if seen.insert(window_id) {
+            explicit.push(window_id);
+        }
+    }
+
+    let mut fallback: Vec<_> = cluster
+        .first_seen_at
+        .iter()
+        .filter_map(|(&window_id, &first_seen)| {
+            (!seen.contains(&window_id)).then_some((window_id, first_seen))
+        })
+        .collect();
+    fallback.sort_unstable_by_key(|(window_id, first_seen)| (*first_seen, *window_id));
+
+    explicit.extend(fallback.into_iter().map(|(window_id, _)| window_id));
+
+    if explicit != cluster.windows {
+        let common: BTreeSet<_> = cluster.windows.iter().copied().collect();
+        let unexpected_reorder = cluster
+            .windows
+            .iter()
+            .all(|window_id| explicit.contains(window_id))
+            && explicit.iter().all(|window_id| common.contains(window_id));
+        tracing::warn!(
+            cluster_id = cluster.cluster_id,
+            previous_order = ?cluster.windows,
+            next_order = ?explicit,
+            unexpected_reorder,
+            "cluster window order changed during canonicalization"
+        );
+    }
+
+    explicit
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,16 +120,17 @@ impl LayoutEngine {
         let mut targets = HashMap::new();
 
         for cluster in clusters {
-            if cluster.windows.is_empty() {
+            let ordered_windows = canonical_cluster_window_order(cluster);
+            if ordered_windows.is_empty() {
                 continue;
             }
 
-            let count = cluster.windows.len() as i32;
+            let count = ordered_windows.len() as i32;
             let base_width = (cluster.area.width / count).max(1);
             let mut x = cluster.area.x;
 
-            for (idx, window_id) in cluster.windows.iter().copied().enumerate() {
-                let is_last = idx + 1 == cluster.windows.len();
+            for (idx, window_id) in ordered_windows.iter().copied().enumerate() {
+                let is_last = idx + 1 == ordered_windows.len();
                 let width = if is_last {
                     (cluster.area.x + cluster.area.width - x).max(1)
                 } else {
@@ -271,6 +315,7 @@ mod tests {
                 height: 50,
             },
             windows: vec![42, 43],
+            first_seen_at: HashMap::from([(42, 10), (43, 20)]),
         }];
 
         let current = HashMap::from([
@@ -356,5 +401,22 @@ mod tests {
             },
         );
         assert_eq!(applied.len(), 1);
+    }
+
+    #[test]
+    fn canonical_order_prefers_explicit_then_first_seen_fallback() {
+        let cluster = ClusterLayoutInput {
+            cluster_id: 5,
+            area: Rect {
+                x: 0,
+                y: 0,
+                width: 90,
+                height: 40,
+            },
+            windows: vec![7, 9],
+            first_seen_at: HashMap::from([(7, 30), (8, 10), (9, 20)]),
+        };
+
+        assert_eq!(canonical_cluster_window_order(&cluster), vec![7, 9, 8]);
     }
 }
