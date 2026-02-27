@@ -116,8 +116,10 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
         glib::ControlFlow::Continue
     });
 
-    let (sender, receiver) = mpsc::channel::<PanelUpdate>();
-    let (status_sender, status_receiver) = mpsc::channel::<PanelStatus>();
+    let (sender, receiver): (mpsc::Sender<PanelUpdate>, mpsc::Receiver<PanelUpdate>) =
+        mpsc::channel();
+    let (status_sender, status_receiver): (mpsc::Sender<PanelStatus>, mpsc::Receiver<PanelStatus>) =
+        mpsc::channel();
 
     thread::spawn(move || {
         let mut backoff = SWAY_CONNECT_INITIAL_BACKOFF;

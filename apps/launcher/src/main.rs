@@ -122,9 +122,10 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
         let state = state.clone();
         let terminal_command = launcher_config.terminal_command.clone();
         let key_controller = gtk::EventControllerKey::new();
+        let controlled_window = window.clone();
         key_controller.connect_key_pressed(move |_, key, _, _| match key {
             gdk::Key::Escape => {
-                window.close();
+                controlled_window.close();
                 glib::Propagation::Stop
             }
             gdk::Key::Down => {
@@ -138,7 +139,7 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
             gdk::Key::Return => {
                 let index = selected_index(&list).unwrap_or(0);
                 if launch_selected(&state.borrow(), index, &terminal_command).is_ok() {
-                    window.close();
+                    controlled_window.close();
                 }
                 glib::Propagation::Stop
             }
