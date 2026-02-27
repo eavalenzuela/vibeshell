@@ -83,6 +83,22 @@ For display-manager style startup, use the same orchestration script directly:
 ./scripts/start-sway-session
 ```
 
+
+### Sway keybinding generation
+
+`crates/sway` includes a small generator (`generate-bindings`) that emits `dev/sway.bindings.generated` from configurable keybinding values. `dev/sway.config` includes that generated file.
+
+Lifecycle:
+
+1. `./scripts/start-sway-session` regenerates `dev/sway.bindings.generated` before launching Sway.
+2. Override bindings/commands with `VIBESHELL_*` env vars (for example `VIBESHELL_SCREENSHOT_CMD`, `VIBESHELL_VOLUME_UP_KEY`, `VIBESHELL_SHELL_RESTART_CMD`).
+3. If you edit defaults in the generator, rerun generation manually and commit the updated generated file:
+
+```bash
+cargo run -p sway --bin generate-bindings -- --output dev/sway.bindings.generated
+```
+
+
 To launch only Sway (without shell components) for debugging:
 
 ```bash

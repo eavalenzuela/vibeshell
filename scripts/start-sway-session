@@ -11,6 +11,47 @@ PANEL_CMD="${VIBESHELL_PANEL_CMD:-cargo run -p panel}"
 LAUNCHER_CMD="${VIBESHELL_LAUNCHER_CMD:-cargo run -p launcher}"
 NOTIFD_CMD="${VIBESHELL_NOTIFD_CMD:-cargo run -p notifd}"
 
+SWAY_BINDINGS_OUTPUT="${VIBESHELL_SWAY_BINDINGS_OUTPUT:-${PROJECT_ROOT}/dev/sway.bindings.generated}"
+LAUNCHER_TOGGLE_KEY="${VIBESHELL_LAUNCHER_TOGGLE_KEY:-\$mod+space}"
+LAUNCHER_TOGGLE_CMD="${VIBESHELL_LAUNCHER_TOGGLE_CMD:-swaymsg '[app_id=\"com.vibeshell.launcher\"] kill' || launcher}"
+SCREENSHOT_KEY="${VIBESHELL_SCREENSHOT_KEY:-Print}"
+SCREENSHOT_CMD="${VIBESHELL_SCREENSHOT_CMD:-grim -g \"$(slurp)\" - | wl-copy}"
+VOLUME_UP_KEY="${VIBESHELL_VOLUME_UP_KEY:-XF86AudioRaiseVolume}"
+VOLUME_UP_CMD="${VIBESHELL_VOLUME_UP_CMD:-wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+}"
+VOLUME_DOWN_KEY="${VIBESHELL_VOLUME_DOWN_KEY:-XF86AudioLowerVolume}"
+VOLUME_DOWN_CMD="${VIBESHELL_VOLUME_DOWN_CMD:-wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-}"
+VOLUME_MUTE_KEY="${VIBESHELL_VOLUME_MUTE_KEY:-XF86AudioMute}"
+VOLUME_MUTE_CMD="${VIBESHELL_VOLUME_MUTE_CMD:-wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle}"
+BRIGHTNESS_UP_KEY="${VIBESHELL_BRIGHTNESS_UP_KEY:-XF86MonBrightnessUp}"
+BRIGHTNESS_UP_CMD="${VIBESHELL_BRIGHTNESS_UP_CMD:-brightnessctl set +10%}"
+BRIGHTNESS_DOWN_KEY="${VIBESHELL_BRIGHTNESS_DOWN_KEY:-XF86MonBrightnessDown}"
+BRIGHTNESS_DOWN_CMD="${VIBESHELL_BRIGHTNESS_DOWN_CMD:-brightnessctl set 10%-}"
+SHELL_QUIT_KEY="${VIBESHELL_SHELL_QUIT_KEY:-\$mod+Shift+e}"
+SHELL_QUIT_CMD="${VIBESHELL_SHELL_QUIT_CMD:-swaymsg exit}"
+SHELL_RESTART_KEY="${VIBESHELL_SHELL_RESTART_KEY:-\$mod+Shift+r}"
+SHELL_RESTART_CMD="${VIBESHELL_SHELL_RESTART_CMD:-swaymsg reload}"
+
+cargo run -p sway --bin generate-bindings -- \
+  --output "${SWAY_BINDINGS_OUTPUT}" \
+  --launcher-toggle-key "${LAUNCHER_TOGGLE_KEY}" \
+  --launcher-toggle-command "${LAUNCHER_TOGGLE_CMD}" \
+  --screenshot-key "${SCREENSHOT_KEY}" \
+  --screenshot-command "${SCREENSHOT_CMD}" \
+  --volume-up-key "${VOLUME_UP_KEY}" \
+  --volume-up-command "${VOLUME_UP_CMD}" \
+  --volume-down-key "${VOLUME_DOWN_KEY}" \
+  --volume-down-command "${VOLUME_DOWN_CMD}" \
+  --volume-mute-key "${VOLUME_MUTE_KEY}" \
+  --volume-mute-command "${VOLUME_MUTE_CMD}" \
+  --brightness-up-key "${BRIGHTNESS_UP_KEY}" \
+  --brightness-up-command "${BRIGHTNESS_UP_CMD}" \
+  --brightness-down-key "${BRIGHTNESS_DOWN_KEY}" \
+  --brightness-down-command "${BRIGHTNESS_DOWN_CMD}" \
+  --shell-quit-key "${SHELL_QUIT_KEY}" \
+  --shell-quit-command "${SHELL_QUIT_CMD}" \
+  --shell-restart-key "${SHELL_RESTART_KEY}" \
+  --shell-restart-command "${SHELL_RESTART_CMD}"
+
 if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
   echo "XDG_RUNTIME_DIR is required to start Sway." >&2
   exit 1
