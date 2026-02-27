@@ -135,6 +135,11 @@ Lifecycle:
 
 1. `./scripts/start-sway-session` regenerates `dev/sway.bindings.generated` before launching Sway.
 2. Override bindings/commands with `VIBESHELL_*` env vars (for example `VIBESHELL_SCREENSHOT_CMD`, `VIBESHELL_VOLUME_UP_KEY`, `VIBESHELL_SHELL_RESTART_CMD`).
+   New Phase 3 IPC-driven overrides:
+   - `VIBESHELL_ZOOM_IN_MODE_KEY` / `VIBESHELL_ZOOM_IN_MODE_CMD` (default: `$mod+equal` → `vibeshellctl ipc zoom-in-mode`)
+   - `VIBESHELL_ZOOM_OUT_MODE_KEY` / `VIBESHELL_ZOOM_OUT_MODE_CMD` (default: `$mod+minus` → `vibeshellctl ipc zoom-out-mode`)
+   - `VIBESHELL_CYCLE_STRIP_FORWARD_KEY` / `VIBESHELL_CYCLE_STRIP_FORWARD_CMD` (default: `$mod+period` → `vibeshellctl ipc cycle-strip-forward`)
+   - `VIBESHELL_CYCLE_STRIP_BACKWARD_KEY` / `VIBESHELL_CYCLE_STRIP_BACKWARD_CMD` (default: `$mod+comma` → `vibeshellctl ipc cycle-strip-backward`)
 3. If you edit defaults in the generator, rerun generation manually and commit the updated generated file:
 
 ```bash

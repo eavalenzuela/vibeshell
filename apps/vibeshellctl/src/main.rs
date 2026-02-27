@@ -64,6 +64,14 @@ enum IpcCommands {
     ActivateCluster { cluster: ClusterId },
     /// Set the focus zoom target to a concrete window id.
     SetFocusZoomTarget { window: WindowId },
+    /// Transition one step deeper in zoom mode (overview→cluster→focus).
+    ZoomInMode,
+    /// Transition one step out in zoom mode (focus→cluster→overview).
+    ZoomOutMode,
+    /// Cycle to the next window in the context strip while in focus zoom.
+    CycleStripForward,
+    /// Cycle to the previous window in the context strip while in focus zoom.
+    CycleStripBackward,
     /// Cycle to the next window in the context strip while in focus zoom.
     CycleContextStripNext,
     /// Cycle to the previous window in the context strip while in focus zoom.
@@ -92,6 +100,8 @@ enum ModelMutation {
 enum IpcRequestType {
     GetState,
     SetFocusZoomTarget,
+    ZoomInMode,
+    ZoomOutMode,
     CycleContextStrip,
 }
 
@@ -178,6 +188,10 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
         IpcCommands::SetFocusZoomTarget { window } => {
             (IpcRequest::SetFocusZoomTarget { window }, false)
         }
+        IpcCommands::ZoomInMode => (IpcRequest::ZoomInMode, false),
+        IpcCommands::ZoomOutMode => (IpcRequest::ZoomOutMode, false),
+        IpcCommands::CycleStripForward => (IpcRequest::CycleStripForward, false),
+        IpcCommands::CycleStripBackward => (IpcRequest::CycleStripBackward, false),
         IpcCommands::CycleContextStripNext => (
             IpcRequest::CycleContextStrip {
                 direction: ContextStripDirection::Next,
@@ -227,6 +241,44 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 Err(error) => Ok(IpcResponse::Error { message: error }),
             }
         }
+        IpcRequest::ZoomInMode => {
+            log_ipc_request(IpcRequestType::ZoomInMode, "daemon-control", None, None);
+            match zoom_in_mode() {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(error) => Ok(IpcResponse::Error { message: error }),
+            }
+        }
+        IpcRequest::ZoomOutMode => {
+            log_ipc_request(IpcRequestType::ZoomOutMode, "daemon-control", None, None);
+            match zoom_out_mode() {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(error) => Ok(IpcResponse::Error { message: error }),
+            }
+        }
+        IpcRequest::CycleStripForward => {
+            log_ipc_request(
+                IpcRequestType::CycleContextStrip,
+                "daemon-control",
+                None,
+                None,
+            );
+            match cycle_context_strip(ContextStripDirection::Next) {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(error) => Ok(IpcResponse::Error { message: error }),
+            }
+        }
+        IpcRequest::CycleStripBackward => {
+            log_ipc_request(
+                IpcRequestType::CycleContextStrip,
+                "daemon-control",
+                None,
+                None,
+            );
+            match cycle_context_strip(ContextStripDirection::Previous) {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(error) => Ok(IpcResponse::Error { message: error }),
+            }
+        }
         IpcRequest::CycleContextStrip { direction } => {
             log_ipc_request(
                 IpcRequestType::CycleContextStrip,
@@ -246,6 +298,79 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
             })
             .to_string(),
         }),
+    }
+}
+
+fn zoom_in_mode() -> Result<(), String> {
+    let state = build_canvas_state_from_sway().map_err(|error| error.to_string())?;
+    match state.zoom {
+        ZoomLevel::Overview => {
+            let cluster_id = state
+                .clusters
+                .first()
+                .map(|cluster| cluster.id)
+                .ok_or_else(|| {
+                    json!({"error":"invalid_state","reason":"no_clusters_available"}).to_string()
+                })?;
+            activate_cluster(cluster_id).map_err(|error| error.to_string())
+        }
+        ZoomLevel::Cluster(cluster_id) => {
+            let cluster = state
+                .clusters
+                .iter()
+                .find(|cluster| cluster.id == cluster_id)
+                .ok_or_else(|| {
+                    json!({"error":"invalid_state","reason":"active_cluster_missing"}).to_string()
+                })?;
+
+            let window_id = cluster
+                .last_focus
+                .or_else(|| cluster.windows.first().copied())
+                .ok_or_else(|| {
+                    json!({"error":"unsupported_state_combination","reason":"cluster_has_no_windows"})
+                        .to_string()
+                })?;
+
+            focus_window(window_id).map_err(|error| error.to_string())
+        }
+        ZoomLevel::Focus(_) => Err(
+            json!({"error":"unsupported_state_combination","reason":"already_in_focus_zoom"})
+                .to_string(),
+        ),
+    }
+}
+
+fn zoom_out_mode() -> Result<(), String> {
+    let state = build_canvas_state_from_sway().map_err(|error| error.to_string())?;
+    match state.zoom {
+        ZoomLevel::Focus(window_id) => {
+            let cluster_id = state
+                .clusters
+                .iter()
+                .find(|cluster| cluster.windows.contains(&window_id))
+                .map(|cluster| cluster.id)
+                .ok_or_else(|| {
+                    json!({"error":"invalid_state","reason":"focused_window_cluster_missing"})
+                        .to_string()
+                })?;
+            activate_cluster(cluster_id).map_err(|error| error.to_string())
+        }
+        ZoomLevel::Cluster(_) => {
+            let mut connection = Connection::new().map_err(|error| error.to_string())?;
+            for reply in connection
+                .run_command("workspace back_and_forth")
+                .map_err(|error| error.to_string())?
+            {
+                if let Err(error) = reply {
+                    return Err(format!("sway rejected overview transition command `workspace back_and_forth`: {error}"));
+                }
+            }
+            Ok(())
+        }
+        ZoomLevel::Overview => Err(
+            json!({"error":"unsupported_state_combination","reason":"already_in_overview_zoom"})
+                .to_string(),
+        ),
     }
 }
 

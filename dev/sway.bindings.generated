@@ -11,5 +11,10 @@ bindsym XF86AudioMute exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
 bindsym XF86MonBrightnessUp exec brightnessctl set +10%
 bindsym XF86MonBrightnessDown exec brightnessctl set 10%-
 
+bindsym $mod+equal exec vibeshellctl ipc zoom-in-mode
+bindsym $mod+minus exec vibeshellctl ipc zoom-out-mode
+bindsym $mod+period exec vibeshellctl ipc cycle-strip-forward
+bindsym $mod+comma exec vibeshellctl ipc cycle-strip-backward
+
 bindsym $mod+Shift+e exec swaymsg exit
 bindsym $mod+Shift+r exec swaymsg reload
