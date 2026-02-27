@@ -8,6 +8,7 @@ license.workspace = true
 common = { path = "../../crates/common" }
 clap = { version = "4.5", features = ["derive"] }
 swayipc = "3"
+tracing.workspace = true
 
 [lints]
 workspace = true

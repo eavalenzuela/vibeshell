@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -66,7 +66,7 @@ struct UiState {
 struct NotificationsService {
     next_id: Arc<AtomicU32>,
     sender: mpsc::Sender<UiEvent>,
-    default_timeout_ms: u64,
+    default_timeout_ms: Arc<AtomicU64>,
 }
 
 #[interface(name = "org.freedesktop.Notifications")]
@@ -93,7 +93,7 @@ impl NotificationsService {
         } else if expire_timeout == 0 {
             None
         } else {
-            Some(self.default_timeout_ms)
+            Some(self.default_timeout_ms.load(Ordering::Relaxed))
         };
 
         let event = NotifyEvent {
@@ -146,15 +146,21 @@ fn main() {
             NotifdConfig::default()
         });
 
+    let (_, reload_rx) = common::spawn_reload_listener();
+
     let app = gtk::Application::builder()
         .application_id("com.vibeshell.notifd")
         .build();
 
-    app.connect_activate(move |app| build_ui(app, notifd_config.clone()));
+    app.connect_activate(move |app| build_ui(app, notifd_config.clone(), reload_rx));
     app.run();
 }
 
-fn build_ui(app: &gtk::Application, notifd_config: NotifdConfig) {
+fn build_ui(
+    app: &gtk::Application,
+    notifd_config: NotifdConfig,
+    reload_rx: mpsc::Receiver<common::ReloadReason>,
+) {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("vibeshell-notifd")
@@ -191,8 +197,9 @@ fn build_ui(app: &gtk::Application, notifd_config: NotifdConfig) {
     install_css();
     window.present();
 
+    let default_timeout_ms = Arc::new(AtomicU64::new(notifd_config.default_timeout_ms));
     let (sender, receiver) = mpsc::channel::<UiEvent>();
-    spawn_dbus_service(sender, notifd_config.default_timeout_ms);
+    spawn_dbus_service(sender, Arc::clone(&default_timeout_ms));
 
     let state = Rc::new(std::cell::RefCell::new(UiState::default()));
 
@@ -201,6 +208,72 @@ fn build_ui(app: &gtk::Application, notifd_config: NotifdConfig) {
             match event {
                 UiEvent::Notify(event) => add_card(&root, &state, event),
                 UiEvent::Close(id) => close_card(&state, id),
+            }
+        }
+
+        glib::ControlFlow::Continue
+    });
+
+    glib::timeout_add_local(Duration::from_millis(200), move || {
+        while let Ok(reason) = reload_rx.try_recv() {
+            match Config::load() {
+                Ok(config) => {
+                    let next = config.notifd;
+                    let mut applied = Vec::new();
+                    let mut restart_required = Vec::new();
+
+                    let current_timeout = default_timeout_ms.load(Ordering::Relaxed);
+                    if current_timeout != next.default_timeout_ms {
+                        applied.push(format!(
+                            "default_timeout_ms: {} -> {}",
+                            current_timeout, next.default_timeout_ms
+                        ));
+                        default_timeout_ms.store(next.default_timeout_ms, Ordering::Relaxed);
+                    }
+
+                    if notifd_config.width != next.width {
+                        applied.push(format!("width: {} -> {}", notifd_config.width, next.width));
+                        window.set_default_width(next.width);
+                    }
+                    if notifd_config.margin_top != next.margin_top {
+                        applied.push(format!(
+                            "margin_top: {} -> {}",
+                            notifd_config.margin_top, next.margin_top
+                        ));
+                        window.set_margin(layer_shell::Edge::Top, next.margin_top);
+                    }
+                    if notifd_config.margin_right != next.margin_right {
+                        applied.push(format!(
+                            "margin_right: {} -> {}",
+                            notifd_config.margin_right, next.margin_right
+                        ));
+                        window.set_margin(layer_shell::Edge::Right, next.margin_right);
+                    }
+
+                    if !window.is_visible() {
+                        restart_required.push("window not visible".to_owned());
+                    }
+
+                    tracing::info!(
+                        trigger = reason.as_str(),
+                        applied = if applied.is_empty() {
+                            "none"
+                        } else {
+                            &applied.join(", ")
+                        },
+                        restart_required = if restart_required.is_empty() {
+                            "none"
+                        } else {
+                            &restart_required.join(", ")
+                        },
+                        "notifd config reload processed"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    ?error,
+                    trigger = reason.as_str(),
+                    "notifd reload ignored due to config load error"
+                ),
             }
         }
 
@@ -242,7 +315,7 @@ fn install_css() {
     );
 }
 
-fn spawn_dbus_service(sender: mpsc::Sender<UiEvent>, default_timeout_ms: u64) {
+fn spawn_dbus_service(sender: mpsc::Sender<UiEvent>, default_timeout_ms: Arc<AtomicU64>) {
     thread::spawn(move || {
         let next_id = Arc::new(AtomicU32::new(1));
         let service = NotificationsService {
