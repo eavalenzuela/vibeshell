@@ -292,14 +292,58 @@ pub struct FrameResult {
 #[derive(Debug, Default)]
 pub struct LayoutEngine;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LayoutMode {
+    Overview,
+    Cluster,
+    Focus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayoutComputeContext {
+    pub mode: LayoutMode,
+    pub focused_window_id: Option<WindowId>,
+    pub focus_ratio: f32,
+}
+
+impl Default for LayoutComputeContext {
+    fn default() -> Self {
+        Self {
+            mode: LayoutMode::Cluster,
+            focused_window_id: None,
+            focus_ratio: 0.75,
+        }
+    }
+}
+
 impl LayoutEngine {
-    pub fn compute(&self, clusters: &[ClusterLayoutInput]) -> HashMap<WindowId, Rect> {
+    pub fn compute(
+        &self,
+        clusters: &[ClusterLayoutInput],
+        context: LayoutComputeContext,
+    ) -> HashMap<WindowId, Rect> {
         let mut targets = HashMap::new();
 
         for cluster in clusters {
             let ordered_windows = canonical_cluster_window_order(cluster);
             if ordered_windows.is_empty() {
                 continue;
+            }
+
+            if matches!(context.mode, LayoutMode::Focus) {
+                if let Some(focused_window_id) = context
+                    .focused_window_id
+                    .filter(|id| ordered_windows.contains(id))
+                {
+                    self.compute_focus_layout(
+                        cluster,
+                        &ordered_windows,
+                        focused_window_id,
+                        context.focus_ratio,
+                        &mut targets,
+                    );
+                    continue;
+                }
             }
 
             let count = ordered_windows.len() as i32;
@@ -329,6 +373,64 @@ impl LayoutEngine {
         }
 
         targets
+    }
+
+    fn compute_focus_layout(
+        &self,
+        cluster: &ClusterLayoutInput,
+        ordered_windows: &[WindowId],
+        focused_window_id: WindowId,
+        focus_ratio: f32,
+        targets: &mut HashMap<WindowId, Rect>,
+    ) {
+        let focus_ratio = focus_ratio.clamp(0.5, 0.95);
+        let strip_windows: Vec<_> = ordered_windows
+            .iter()
+            .copied()
+            .filter(|window_id| *window_id != focused_window_id)
+            .collect();
+
+        let focused_width = ((cluster.area.width as f32) * focus_ratio).round() as i32;
+        let focused_width = focused_width.clamp(1, cluster.area.width.max(1));
+        let strip_width = (cluster.area.width - focused_width).max(0);
+
+        targets.insert(
+            focused_window_id,
+            Rect {
+                x: cluster.area.x,
+                y: cluster.area.y,
+                width: focused_width,
+                height: cluster.area.height,
+            },
+        );
+
+        if strip_windows.is_empty() {
+            return;
+        }
+
+        let mut strip_x = cluster.area.x + focused_width;
+        let base_strip_width = (strip_width / strip_windows.len() as i32).max(1);
+
+        for (idx, window_id) in strip_windows.iter().copied().enumerate() {
+            let is_last = idx + 1 == strip_windows.len();
+            let width = if is_last {
+                (cluster.area.x + cluster.area.width - strip_x).max(1)
+            } else {
+                base_strip_width
+            };
+
+            targets.insert(
+                window_id,
+                Rect {
+                    x: strip_x,
+                    y: cluster.area.y,
+                    width,
+                    height: cluster.area.height,
+                },
+            );
+
+            strip_x += width;
+        }
     }
 
     pub fn apply(ops: &[LayoutOp]) -> Option<String> {
@@ -433,7 +535,9 @@ impl FramePipeline {
             .cloned()
             .collect();
 
-        let computed_targets = self.layout_engine.compute(&affected);
+        let computed_targets = self
+            .layout_engine
+            .compute(&affected, LayoutComputeContext::default());
         tracing::info!(
             stage = "computed_windows",
             computed_windows = computed_targets.len(),
@@ -620,6 +724,103 @@ mod tests {
 
         assert_eq!(canonical_cluster_window_order(&cluster), vec![2]);
     }
+
+    #[test]
+    fn focus_layout_gives_dominant_width_to_focused_window() {
+        let engine = LayoutEngine;
+        let cluster = ClusterLayoutInput {
+            cluster_id: 11,
+            area: Rect {
+                x: 0,
+                y: 0,
+                width: 1000,
+                height: 600,
+            },
+            windows: vec![10, 11, 12],
+            first_seen_at: HashMap::from([(10, 1), (11, 2), (12, 3)]),
+            excluded_windows: HashMap::new(),
+        };
+
+        let computed = engine.compute(
+            &[cluster],
+            LayoutComputeContext {
+                mode: LayoutMode::Focus,
+                focused_window_id: Some(11),
+                focus_ratio: 0.75,
+            },
+        );
+
+        assert_eq!(computed.get(&11).expect("focused window").width, 750);
+        assert_eq!(computed.get(&10).expect("strip window").width, 125);
+        assert_eq!(computed.get(&12).expect("strip window").width, 125);
+    }
+
+    #[test]
+    fn focus_layout_keeps_strip_order_stable() {
+        let engine = LayoutEngine;
+        let cluster = ClusterLayoutInput {
+            cluster_id: 12,
+            area: Rect {
+                x: 100,
+                y: 50,
+                width: 900,
+                height: 400,
+            },
+            windows: vec![21, 22, 23, 24],
+            first_seen_at: HashMap::from([(21, 1), (22, 2), (23, 3), (24, 4)]),
+            excluded_windows: HashMap::new(),
+        };
+
+        let computed = engine.compute(
+            &[cluster],
+            LayoutComputeContext {
+                mode: LayoutMode::Focus,
+                focused_window_id: Some(23),
+                focus_ratio: 0.75,
+            },
+        );
+
+        let strip_x = [21, 22, 24]
+            .into_iter()
+            .map(|id| computed.get(&id).expect("strip window").x)
+            .collect::<Vec<_>>();
+        assert_eq!(strip_x, vec![775, 850, 925]);
+    }
+
+    #[test]
+    fn focus_layout_does_not_place_excluded_windows() {
+        let engine = LayoutEngine;
+        let cluster = ClusterLayoutInput {
+            cluster_id: 13,
+            area: Rect {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 500,
+            },
+            windows: vec![31, 32, 33],
+            first_seen_at: HashMap::from([(31, 1), (32, 2), (33, 3), (34, 4)]),
+            excluded_windows: HashMap::from([
+                (32, LayoutExclusionReason::FullscreenTemporaryOverride),
+                (34, LayoutExclusionReason::OverlayOrPopup),
+            ]),
+        };
+
+        let computed = engine.compute(
+            &[cluster],
+            LayoutComputeContext {
+                mode: LayoutMode::Focus,
+                focused_window_id: Some(31),
+                focus_ratio: 0.75,
+            },
+        );
+
+        assert!(computed.contains_key(&31));
+        assert!(computed.contains_key(&33));
+        assert!(!computed.contains_key(&32));
+        assert!(!computed.contains_key(&34));
+    }
+
     #[test]
     fn enter_cluster_zoom_tracks_original_workspace_and_builds_move_commands() {
         let mut controller = WorkspaceTransitionController::new("__continuum");
