@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use common::contracts::{
@@ -13,7 +14,7 @@ use serde::Serialize;
 use serde_json::json;
 use tracing::{info, warn};
 
-use swayipc::{Connection, EventType};
+use swayipc::{Connection, EventType, Node};
 
 mod state_store;
 use state_store::with_state_owner;
@@ -77,6 +78,21 @@ enum IpcCommands {
     CycleContextStripNext,
     /// Cycle to the previous window in the context strip while in focus zoom.
     CycleContextStripPrevious,
+}
+
+static FOCUS_HANDOFF: OnceLock<Mutex<FocusHandoffController>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+struct FocusHandoffController {
+    pre_overview_focus: Option<WindowId>,
+    frozen_in_overview: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FocusPlan {
+    None,
+    ActivateCluster(ClusterId),
+    FocusWindow(WindowId),
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -221,10 +237,16 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
         IpcRequest::SetZoom {
             level: ZoomLevel::Cluster(cluster_id),
         } => {
-            let result = with_state_owner(|owner| owner.activate_cluster(cluster_id));
+            let (result, previous_zoom, next_zoom, state) = with_state_owner(|owner| {
+                let previous_zoom = owner.state().zoom;
+                let result = owner.activate_cluster(cluster_id);
+                let state = owner.state();
+                let next_zoom = state.zoom.clone();
+                (result, previous_zoom, next_zoom, state)
+            });
             match result {
                 Ok(()) => {
-                    activate_cluster(cluster_id)?;
+                    apply_focus_handoff(previous_zoom, next_zoom, &state, Some(cluster_id), None)?;
                     Ok(IpcResponse::Ack)
                 }
                 Err(message) => Ok(IpcResponse::Error { message }),
@@ -237,14 +259,23 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 None,
                 Some(window),
             );
-            let result = with_state_owner(|owner| owner.set_focus_zoom_target(window));
+            let (result, previous_zoom, next_zoom, state, cluster_id) = with_state_owner(|owner| {
+                let previous_zoom = owner.state().zoom;
+                let result = owner.set_focus_zoom_target(window);
+                let state = owner.state();
+                let next_zoom = state.zoom.clone();
+                let cluster_id = owner.selected_cluster_id();
+                (result, previous_zoom, next_zoom, state, cluster_id)
+            });
             match result {
                 Ok(()) => {
-                    if let Some(cluster_id) = with_state_owner(|owner| owner.selected_cluster_id())
-                    {
-                        activate_cluster(cluster_id)?;
-                    }
-                    focus_window(window)?;
+                    apply_focus_handoff(
+                        previous_zoom,
+                        next_zoom,
+                        &state,
+                        cluster_id,
+                        Some(window),
+                    )?;
                     Ok(IpcResponse::Ack)
                 }
                 Err(message) => Ok(IpcResponse::Error { message }),
@@ -252,18 +283,22 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
         }
         IpcRequest::ZoomInMode => {
             log_ipc_request(IpcRequestType::ZoomInMode, "daemon-control", None, None);
-            let (result, new_zoom) = with_state_owner(|owner| {
+            let (result, previous_zoom, next_zoom, state) = with_state_owner(|owner| {
+                let previous_zoom = owner.state().zoom;
                 let result = owner.zoom_in_mode();
-                let new_zoom = owner.state().zoom;
-                (result, new_zoom)
+                let state = owner.state();
+                let next_zoom = state.zoom.clone();
+                (result, previous_zoom, next_zoom, state)
             });
             match result {
                 Ok(()) => {
-                    match new_zoom {
-                        ZoomLevel::Cluster(cluster_id) => activate_cluster(cluster_id)?,
-                        ZoomLevel::Focus(window_id) => focus_window(window_id)?,
-                        ZoomLevel::Overview => {}
-                    }
+                    apply_focus_handoff(
+                        previous_zoom,
+                        next_zoom,
+                        &state,
+                        state.clusters.first().map(|c| c.id),
+                        None,
+                    )?;
                     Ok(IpcResponse::Ack)
                 }
                 Err(message) => Ok(IpcResponse::Error { message }),
@@ -271,18 +306,25 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
         }
         IpcRequest::ZoomOutMode => {
             log_ipc_request(IpcRequestType::ZoomOutMode, "daemon-control", None, None);
-            let (result, new_zoom) = with_state_owner(|owner| {
+            let (result, previous_zoom, next_zoom, state) = with_state_owner(|owner| {
+                let previous_zoom = owner.state().zoom;
                 let result = owner.zoom_out_mode();
-                let new_zoom = owner.state().zoom;
-                (result, new_zoom)
+                let state = owner.state();
+                let next_zoom = state.zoom.clone();
+                (result, previous_zoom, next_zoom, state)
             });
             match result {
                 Ok(()) => {
-                    match new_zoom {
-                        ZoomLevel::Cluster(cluster_id) => activate_cluster(cluster_id)?,
-                        ZoomLevel::Overview => send_overview_transition()?,
-                        ZoomLevel::Focus(window_id) => focus_window(window_id)?,
+                    if matches!(next_zoom, ZoomLevel::Overview) {
+                        send_overview_transition()?;
                     }
+                    apply_focus_handoff(
+                        previous_zoom,
+                        next_zoom,
+                        &state,
+                        state.clusters.first().map(|c| c.id),
+                        None,
+                    )?;
                     Ok(IpcResponse::Ack)
                 }
                 Err(message) => Ok(IpcResponse::Error { message }),
@@ -391,6 +433,182 @@ fn send_overview_transition() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn apply_focus_handoff(
+    previous_zoom: ZoomLevel,
+    next_zoom: ZoomLevel,
+    state: &CanvasState,
+    requested_cluster: Option<ClusterId>,
+    requested_window: Option<WindowId>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut controller = FOCUS_HANDOFF
+        .get_or_init(|| Mutex::new(FocusHandoffController::default()))
+        .lock()
+        .expect("focus handoff mutex poisoned");
+
+    if !matches!(previous_zoom, ZoomLevel::Overview) && matches!(next_zoom, ZoomLevel::Overview) {
+        controller.pre_overview_focus = query_focused_window_id().ok().flatten();
+        controller.frozen_in_overview = true;
+        info!(
+            previous_zoom = ?previous_zoom,
+            next_zoom = ?next_zoom,
+            pre_overview_focus = controller.pre_overview_focus,
+            "focus handoff entered overview"
+        );
+        return Ok(());
+    }
+
+    if matches!(next_zoom, ZoomLevel::Overview) {
+        controller.frozen_in_overview = true;
+        info!(
+            previous_zoom = ?previous_zoom,
+            next_zoom = ?next_zoom,
+            "focus handoff skipping focus churn while in overview"
+        );
+        return Ok(());
+    }
+
+    let exiting_overview =
+        matches!(previous_zoom, ZoomLevel::Overview) && !matches!(next_zoom, ZoomLevel::Overview);
+    if exiting_overview {
+        controller.frozen_in_overview = false;
+    }
+
+    let plan = if exiting_overview {
+        deterministic_focus_plan(
+            state,
+            requested_cluster,
+            requested_window,
+            next_zoom.clone(),
+            controller.pre_overview_focus,
+        )
+    } else {
+        match next_zoom {
+            ZoomLevel::Cluster(cluster_id) => FocusPlan::ActivateCluster(cluster_id),
+            ZoomLevel::Focus(window_id) => FocusPlan::FocusWindow(window_id),
+            ZoomLevel::Overview => FocusPlan::None,
+        }
+    };
+
+    info!(
+        previous_zoom = ?previous_zoom,
+        next_zoom = ?next_zoom,
+        requested_cluster,
+        requested_window,
+        pre_overview_focus = controller.pre_overview_focus,
+        ?plan,
+        "focus handoff resolved transition"
+    );
+
+    match plan {
+        FocusPlan::None => {}
+        FocusPlan::ActivateCluster(cluster_id) => {
+            activate_cluster(cluster_id)?;
+        }
+        FocusPlan::FocusWindow(window_id) => {
+            if let Some(cluster_id) = state
+                .windows
+                .iter()
+                .find(|window| window.id == window_id)
+                .and_then(|window| window.cluster_id)
+            {
+                activate_cluster(cluster_id)?;
+            }
+            focus_window(window_id)?;
+        }
+    }
+
+    if exiting_overview {
+        controller.pre_overview_focus = None;
+    }
+
+    Ok(())
+}
+
+fn deterministic_focus_plan(
+    state: &CanvasState,
+    requested_cluster: Option<ClusterId>,
+    requested_window: Option<WindowId>,
+    next_zoom: ZoomLevel,
+    pre_overview_focus: Option<WindowId>,
+) -> FocusPlan {
+    if let Some(window_id) = requested_window {
+        return FocusPlan::FocusWindow(window_id);
+    }
+
+    if let ZoomLevel::Focus(window_id) = next_zoom {
+        return FocusPlan::FocusWindow(window_id);
+    }
+
+    let target_cluster = match next_zoom {
+        ZoomLevel::Cluster(cluster_id) => Some(cluster_id),
+        ZoomLevel::Focus(window_id) => state
+            .windows
+            .iter()
+            .find(|window| window.id == window_id)
+            .and_then(|window| window.cluster_id),
+        ZoomLevel::Overview => requested_cluster,
+    }
+    .or(requested_cluster);
+
+    if let Some(window_id) = pre_overview_focus {
+        let belongs_to_target = state
+            .windows
+            .iter()
+            .find(|window| window.id == window_id)
+            .and_then(|window| window.cluster_id)
+            .zip(target_cluster)
+            .map(|(cluster_id, target)| cluster_id == target)
+            .unwrap_or(false);
+        if belongs_to_target {
+            return FocusPlan::FocusWindow(window_id);
+        }
+    }
+
+    if let Some(cluster_id) = target_cluster {
+        if let Some(cluster) = state
+            .clusters
+            .iter()
+            .find(|cluster| cluster.id == cluster_id)
+        {
+            if let Some(window_id) = cluster
+                .last_focus
+                .or_else(|| cluster.windows.first().copied())
+            {
+                return FocusPlan::FocusWindow(window_id);
+            }
+            return FocusPlan::ActivateCluster(cluster_id);
+        }
+    }
+
+    FocusPlan::None
+}
+
+fn query_focused_window_id() -> Result<Option<WindowId>, Box<dyn std::error::Error>> {
+    let mut connection = Connection::new()?;
+    let tree = connection.get_tree()?;
+    Ok(find_focused_window_id(&tree))
+}
+
+fn find_focused_window_id(node: &Node) -> Option<WindowId> {
+    if node.focused && node.pid.is_some() {
+        return Some(node.id as WindowId);
+    }
+
+    for child in &node.nodes {
+        if let Some(window_id) = find_focused_window_id(child) {
+            return Some(window_id);
+        }
+    }
+
+    for child in &node.floating_nodes {
+        if let Some(window_id) = find_focused_window_id(child) {
+            return Some(window_id);
+        }
+    }
+
+    None
 }
 
 fn reload() -> Result<(), Box<dyn std::error::Error>> {

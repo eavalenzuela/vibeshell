@@ -9,6 +9,7 @@ use common::contracts::{CanvasState, ClusterId, IpcResponse};
 use gtk::glib;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 
+mod interaction_state;
 mod ui;
 
 const REFRESH_INTERVAL: Duration = Duration::from_millis(1200);
@@ -53,8 +54,20 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
-    let overview_canvas =
-        ui::OverviewCanvas::new(Rc::clone(&activate_cluster), Rc::clone(&activate_cluster));
+    let zoom_back = Rc::new(|| {
+        let status = Command::new("vibeshellctl")
+            .args(["ipc", "zoom-out-mode"])
+            .status();
+        if let Err(error) = status {
+            tracing::warn!(?error, "failed to zoom out via IPC");
+        }
+    });
+
+    let overview_canvas = ui::OverviewCanvas::new(
+        Rc::clone(&activate_cluster),
+        Rc::clone(&activate_cluster),
+        Rc::clone(&zoom_back),
+    );
 
     window.set_content(Some(overview_canvas.widget()));
     window.present();

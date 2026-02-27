@@ -8,6 +8,8 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
 
+use crate::interaction_state::{EscapeAction, InteractionEvent, InteractionMachine};
+
 const CARD_WIDTH: f64 = 320.0;
 const CARD_HEIGHT: f64 = 140.0;
 const DRAG_THRESHOLD_PX: f64 = 8.0;
@@ -33,10 +35,15 @@ struct WidgetState {
     selected_cluster: Option<ClusterId>,
     cluster_offsets: HashMap<ClusterId, (f64, f64)>,
     drag_mode: Option<DragMode>,
+    interaction: InteractionMachine,
 }
 
 impl OverviewCanvas {
-    pub fn new(on_activate: Rc<dyn Fn(ClusterId)>, on_dive: Rc<dyn Fn(ClusterId)>) -> Self {
+    pub fn new(
+        on_activate: Rc<dyn Fn(ClusterId)>,
+        on_dive: Rc<dyn Fn(ClusterId)>,
+        on_zoom_back: Rc<dyn Fn()>,
+    ) -> Self {
         let area = gtk::DrawingArea::builder()
             .hexpand(true)
             .vexpand(true)
@@ -48,6 +55,7 @@ impl OverviewCanvas {
             selected_cluster: None,
             cluster_offsets: HashMap::new(),
             drag_mode: None,
+            interaction: InteractionMachine::default(),
         }));
 
         area.set_draw_func({
@@ -70,6 +78,9 @@ impl OverviewCanvas {
                 let hit = hit_test(&state, width(&area), height(&area), x, y);
 
                 if n_press >= 2 {
+                    state
+                        .interaction
+                        .on_event(InteractionEvent::DoubleClickCluster);
                     if let Some(cluster_id) = state.selected_cluster {
                         on_dive(cluster_id);
                     }
@@ -78,7 +89,9 @@ impl OverviewCanvas {
 
                 if let Some(cluster_id) = hit {
                     state.selected_cluster = Some(cluster_id);
+                    state.interaction.on_event(InteractionEvent::ClickCluster);
                     if modifiers.contains(gdk::ModifierType::SHIFT_MASK) {
+                        state.interaction.on_event(InteractionEvent::DragStartPan);
                         state.drag_mode = Some(DragMode::Panning {
                             viewport_start: (
                                 state.canvas_state.viewport.x,
@@ -90,6 +103,10 @@ impl OverviewCanvas {
                     }
                 } else {
                     state.selected_cluster = None;
+                    state
+                        .interaction
+                        .on_event(InteractionEvent::ClickBackground);
+                    state.interaction.on_event(InteractionEvent::DragStartPan);
                     state.drag_mode = Some(DragMode::Panning {
                         viewport_start: (
                             state.canvas_state.viewport.x,
@@ -105,7 +122,14 @@ impl OverviewCanvas {
         click.connect_released({
             let data = Rc::clone(&data);
             move |_, _, _, _| {
-                data.borrow_mut().drag_mode = None;
+                let mut state = data.borrow_mut();
+                if matches!(
+                    state.drag_mode,
+                    Some(DragMode::DraggingCluster { .. }) | Some(DragMode::Panning { .. })
+                ) {
+                    state.interaction.on_event(InteractionEvent::DragRelease);
+                }
+                state.drag_mode = None;
             }
         });
         area.add_controller(click);
@@ -127,6 +151,9 @@ impl OverviewCanvas {
                         if distance < DRAG_THRESHOLD_PX {
                             return;
                         }
+                        state
+                            .interaction
+                            .on_event(InteractionEvent::DragStartCluster);
                         state.drag_mode = Some(DragMode::DraggingCluster { cluster_id });
                         apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);
                     }
@@ -145,7 +172,11 @@ impl OverviewCanvas {
         drag.connect_drag_end({
             let data = Rc::clone(&data);
             move |_, _, _| {
-                data.borrow_mut().drag_mode = None;
+                let mut state = data.borrow_mut();
+                if state.drag_mode.is_some() {
+                    state.interaction.on_event(InteractionEvent::DragRelease);
+                }
+                state.drag_mode = None;
             }
         });
         area.add_controller(drag);
@@ -176,6 +207,7 @@ impl OverviewCanvas {
             let area = area.clone();
             let data = Rc::clone(&data);
             let on_activate = Rc::clone(&on_activate);
+            let on_zoom_back = Rc::clone(&on_zoom_back);
             move |_, keyval, _, _| {
                 let mut state = data.borrow_mut();
                 let viewport = &mut state.canvas_state.viewport;
@@ -213,8 +245,27 @@ impl OverviewCanvas {
                         glib::Propagation::Stop
                     }
                     gdk::Key::Return => {
+                        state.interaction.on_event(InteractionEvent::Enter);
                         if let Some(cluster_id) = state.selected_cluster {
                             on_activate(cluster_id);
+                        }
+                        glib::Propagation::Stop
+                    }
+                    gdk::Key::Escape => {
+                        let transient_overlay_open = state.selected_cluster.is_some();
+                        match state.interaction.handle_escape(transient_overlay_open) {
+                            EscapeAction::CancelDrag => {
+                                state.drag_mode = None;
+                                area.queue_draw();
+                            }
+                            EscapeAction::CloseTransientOverlayUi => {
+                                state.selected_cluster = None;
+                                area.queue_draw();
+                            }
+                            EscapeAction::ZoomBack => {
+                                on_zoom_back();
+                            }
+                            EscapeAction::None => {}
                         }
                         glib::Propagation::Stop
                     }
@@ -233,6 +284,7 @@ impl OverviewCanvas {
 
     pub fn set_canvas_state(&self, state: CanvasState) {
         let mut data = self.data.borrow_mut();
+        data.interaction.sync_zoom(state.zoom.clone());
         data.canvas_state = state;
 
         if !data
