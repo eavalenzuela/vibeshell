@@ -1,0 +1,412 @@
+Continuum WM v1 feature set
+Must-have interactions (v1)
+
+Zoom navigation
+
+Zoom levels: Overview → Cluster → Focus
+
+Bindings: Mod+Wheel (zoom), Mod+Drag or Mod+Arrows (pan), Mod+Enter (dive), Mod+Esc/Backspace (zoom out)
+
+Clusters (task neighborhoods)
+
+Create cluster, rename, move on canvas
+
+Send focused window to cluster
+
+“Auto-cluster” heuristic v1: by app_id/class (optional toggle)
+
+Layout morphing by zoom level
+
+Overview: clusters are cards (thumbnails later)
+
+Cluster: windows arranged in an adaptive tile (simple BSP or columns)
+
+Focus: one window dominant; others become a “context strip” (small tiles along an edge)
+
+Fast recall
+
+“Recent clusters” switcher (like Alt-Tab but for clusters)
+
+Search: launcher can search windows and clusters
+
+Persistence
+
+Save/restore: cluster positions, window→cluster mapping, last viewport/zoom
+
+Graceful handling when windows are missing (apps closed)
+
+Must-have “desktop reality” features (v1)
+
+Multi-monitor: per-output viewport (even if you keep one global canvas)
+
+Basic rules: float dialogs, keep transient windows attached to parent
+
+Handle special windows:
+
+fullscreen, scratchpad, modals, popups
+
+Non-jank repositioning:
+
+debounce geometry updates
+
+avoid fighting user-driven resizes (define “manual override” behavior)
+
+Explicit non-goals (keep v1 shippable)
+
+Perfect smooth animation (you can do step transitions first)
+
+True live thumbnails in overview (you can do icons + titles first)
+
+Complex auto-layout intelligence (start with deterministic simple rules)
+
+Internal state model (Rust-friendly)
+
+Think of it as a small scene graph + constraints, with Sway as the executor.
+
+Core entities
+CanvasState
+
+zoom: ZoomLevel (Overview | Cluster(u64) | Focus(WindowId))
+
+viewport: Viewport (center x,y, scale, per-output optional)
+
+active_cluster: ClusterId (derived from zoom, but useful)
+
+outputs: Vec<OutputState>
+
+Cluster
+
+id: ClusterId
+
+name: String
+
+pos: Vec2 (canvas coordinates)
+
+radius: f32 (for hit-testing / overview layout)
+
+windows: Vec<WindowId>
+
+layout: ClusterLayout (e.g., Columns, Bsp, Stack+Strip)
+
+rules: ClusterRules (optional v1: default terminal dir, etc.)
+
+last_focus: Option<WindowId>
+
+Window
+
+id: WindowId (Sway container id)
+
+app_id/class/title
+
+pid: Option<u32> (if you can get it)
+
+role: WindowRole (Normal | Dialog | Utility | Overlay | Fullscreen)
+
+state: WindowState (Tiled | Floating | Fullscreen | MinimizedLike)
+
+geom: Rect (last known from Sway)
+
+manual_geom_override: bool (if user moved it)
+
+cluster: ClusterId
+
+transient_for: Option<WindowId> (dialogs)
+
+tags: HashSet<String> (optional)
+
+OutputState
+
+name: String
+
+geom: Rect (output bounds)
+
+scale: f32
+
+viewport: Viewport (if per-monitor)
+
+focused: bool
+
+Geometry pipeline: “intent → plan → apply”
+
+Intent: user input or WM event triggers a desired state change
+
+zoom changed, cluster moved, new window created, focus changed, output hotplug
+
+Plan: compute target rectangles for affected windows
+
+LayoutEngine::compute(canvas_state) -> HashMap<WindowId, TargetRect>
+
+Apply: send minimal diff commands to Sway
+
+only move/resize windows whose target differs beyond a threshold
+
+This separation is the difference between “works sometimes” and “predictable.”
+
+Deterministic layout rules (v1)
+
+Keep it simple and consistent:
+
+Overview
+
+Don’t move real windows.
+
+Your shell draws cluster cards (and maybe a list of windows per cluster).
+
+Cluster zoom
+
+Choose a bounding rect (work area minus panel)
+
+Tile windows deterministically:
+
+1 window: full
+
+2 windows: split
+
+3+: columns or BSP with stable ordering
+
+Focus zoom
+
+Focused window gets ~70–80% of area
+
+Others become “strip” (vertical or horizontal) ordered by recency
+
+Stable ordering is crucial (e.g., by last focus time). Users will hate “window shuffle.”
+
+IPC layer and integration strategy
+In Sway-prototype mode (recommended first)
+
+You’ll use two IPC “planes”:
+
+Read plane (events + state)
+
+swayipc subscribe: window, workspace, output, binding, shutdown events
+
+occasional get_tree, get_workspaces, get_outputs snapshots
+
+Write plane (commands)
+
+command: move/resize/focus, mark, criteria selectors
+
+Practical Sway mechanics to lean on
+
+Use marks to keep a stable handle to windows:
+
+assign mark --add __contwm_<id> (or based on container id)
+
+then target by [con_mark="..."] in commands
+
+Maintain a mapping: WindowId <-> mark <-> cluster
+
+Prefer batching: send a single command string with ; separated operations per “frame”
+
+Example apply cycle (conceptually):
+
+For each window needing change:
+
+"[con_id=123] floating enable, resize set width height, move position x y"
+(You’ll refine based on whether you use floating or tiled control.)
+
+Important limitation: Sway tiling is tree-based; absolute positioning is easiest with floating windows. A workable hybrid:
+
+In “Cluster” and “Focus” zoom, keep windows tiled and manipulate layout via splith/splitv + layout + resize set + move in container tree.
+
+If that gets too fiddly early, prototype using floating for everything inside a dedicated workspace, then migrate to tiling control.
+
+Clean internal IPC (inside your shell)
+
+Even if everything is one binary today, define an internal protocol so you can split later:
+
+contwmctl (client) → contwmd (daemon)
+
+Transport: local Unix socket with JSON messages or D-Bus (zbus)
+
+Messages:
+
+SetZoom { level }
+
+Pan { dx, dy }
+
+CreateCluster { name, pos }
+
+MoveWindowToCluster { window, cluster }
+
+RenameCluster { ... }
+
+GetState
+
+ReloadConfig
+
+This makes it easy to:
+
+keep input handling in the panel
+
+keep layout logic in a daemon
+
+later swap Sway backend for wlroots backend without changing UI clients
+
+Backend abstraction (so you don’t rewrite everything later)
+
+Define a trait:
+
+trait WmBackend {
+  fn snapshot(&self) -> Snapshot;
+  fn subscribe(&self) -> EventStream;
+  fn apply(&self, plan: &Plan) -> Result<()>;
+}
+
+Implementations:
+
+SwayBackend (now)
+
+WlrootsBackend (future compositor)
+
+Implementation roadmap (build from what you have)
+Phase 0 — Lock the contract (1–2 days)
+
+Define:
+
+config schema (clusters enabled, zoom step sizes, strip placement)
+
+message protocol (internal IPC)
+
+data model structs + serialization (serde)
+
+Add logging + a “state dump” command: contwmctl dump-state
+
+Exit criteria: you can print a coherent model of windows/clusters and reload it.
+
+Phase 1 — Cluster model on top of Sway (prototype without moving windows yet)
+
+Build cluster CRUD:
+
+create/rename/delete/move cluster (pure model)
+
+assign window → cluster (manual)
+
+Track window lifecycle from Sway:
+
+on new window: auto-assign to active cluster (simple)
+
+on close: remove from model
+
+Add a UI overlay (GTK layer-shell) for:
+
+Overview: show clusters + window lists
+
+Click cluster to activate (still uses normal workspaces underneath)
+
+Exit criteria: you can manage clusters reliably, even if geometry is unchanged.
+
+Phase 2 — Geometry control in “Cluster zoom” (first real Continuum behavior)
+
+Choose a single Sway workspace as the “continuum workspace”
+
+When entering Cluster zoom:
+
+compute target tiling layout for that cluster
+
+apply via Sway IPC
+
+Add debouncing:
+
+coalesce multiple events (new window + focus + zoom) into one apply pass
+
+Exit criteria: selecting a cluster consistently rearranges its windows into a stable layout.
+
+Phase 3 — Focus zoom + context strip
+
+Implement “focused window dominant” layout
+
+Maintain recency list per cluster
+
+Bindings:
+
+zoom in/out changes layout mode
+
+“cycle in strip” keybind
+
+Exit criteria: focus mode is useful and predictable (no window shuffle, no flicker).
+
+Phase 4 — Overview becomes real (visual navigation)
+
+Overview overlay:
+
+spatial positions of clusters on a canvas
+
+pan/zoom the overlay itself
+
+drag clusters around
+
+Add “snap-to” and inertial feel later (optional)
+
+Exit criteria: you can navigate primarily from overview without remembering numbers.
+
+Phase 5 — Persistence + robustness (make it daily-drivable)
+
+Persist:
+
+clusters, positions, window assignment hints (by app_id + title patterns)
+
+last active cluster + viewport
+
+Robust special-cases:
+
+fullscreen windows (treat as temporarily overriding zoom)
+
+dialogs transient_for parent (keep near parent / don’t strip)
+
+multi-output behavior (at least don’t break)
+
+Exit criteria: restart session and your landscape comes back sensibly.
+
+Phase 6 — Performance polish (before compositor work)
+
+Reduce IPC chatter:
+
+only apply diffs above thresholds
+
+batch commands
+
+avoid frequent get_tree (prefer event-driven state)
+
+Optional: add simple animations in the UI overlay only (not moving windows smoothly yet)
+
+Exit criteria: no “constant resizing” feeling; CPU stays sane.
+
+Phase 7 — Decide if/when to roll compositor
+
+Once the model is validated and people like the interaction:
+
+Start wlroots compositor if you need:
+
+smooth transitions
+
+true scene graph integration (thumbnails, blur, perfect zoom)
+
+input policy / gestures deeply integrated
+
+The key is you’ll already have:
+
+the state model
+
+the layout engine
+
+the internal IPC protocol
+
+the UX proven
+
+So the compositor becomes “new backend,” not “rewrite the product.”
+
+A practical v1 implementation tip
+
+Treat your Sway prototype as a behavioral simulator:
+
+“Overview” is your UI overlay (not actual window thumbnails at first)
+
+“Zoom” is discrete modes with deterministic layouts
+
+“Pan” moves the conceptual viewport and changes active cluster, not physical window coordinates
+
+That keeps it feasible now and still maps cleanly to a native compositor later.
+
+If you want, I can sketch the first-pass layout algorithm (columns/BSP + strip) and the exact Sway commands strategy that tends to be least janky.
