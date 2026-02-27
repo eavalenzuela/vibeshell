@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -8,7 +7,6 @@ use std::time::Duration;
 use adw::prelude::*;
 use common::contracts::{CanvasState, ClusterId, IpcResponse};
 use gtk::glib;
-use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 
 mod ui;
@@ -46,26 +44,22 @@ fn build_ui(app: &adw::Application) {
         window.set_anchor(layer_shell::Edge::Right, true);
     }
 
-    let list = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .margin_top(16)
-        .margin_bottom(16)
-        .margin_start(16)
-        .margin_end(16)
-        .build();
+    let activate_cluster = Rc::new(|cluster_id: ClusterId| {
+        let status = Command::new("vibeshellctl")
+            .args(["ipc", "activate-cluster", &cluster_id.to_string()])
+            .status();
+        if let Err(error) = status {
+            tracing::warn!(?error, cluster_id, "failed to activate cluster via IPC");
+        }
+    });
 
-    let scroller = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .hexpand(true)
-        .child(&list)
-        .build();
+    let overview_canvas =
+        ui::OverviewCanvas::new(Rc::clone(&activate_cluster), Rc::clone(&activate_cluster));
 
-    window.set_content(Some(&scroller));
+    window.set_content(Some(overview_canvas.widget()));
     window.present();
 
-    let last_state = Rc::new(RefCell::new(None::<CanvasState>));
+    let last_state = Rc::new(std::cell::RefCell::new(None::<CanvasState>));
     let (tx, rx) = mpsc::channel::<()>();
 
     thread::spawn({
@@ -88,19 +82,9 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
-    let activate_cluster = Rc::new(|cluster_id: ClusterId| {
-        let status = Command::new("vibeshellctl")
-            .args(["ipc", "activate-cluster", &cluster_id.to_string()])
-            .status();
-        if let Err(error) = status {
-            tracing::warn!(?error, cluster_id, "failed to activate cluster via IPC");
-        }
-    });
-
     {
-        let list = list.clone();
         let last_state = Rc::clone(&last_state);
-        let activate_cluster = Rc::clone(&activate_cluster);
+        let overview_canvas = overview_canvas;
         glib::timeout_add_local(Duration::from_millis(120), move || {
             let mut should_refresh = false;
             while rx.try_recv().is_ok() {
@@ -110,8 +94,7 @@ fn build_ui(app: &adw::Application) {
             if should_refresh {
                 if let Some(state) = fetch_state_via_ipc() {
                     if last_state.borrow().as_ref() != Some(&state) {
-                        let cb = Rc::clone(&activate_cluster);
-                        ui::render_clusters(&list, &state, cb);
+                        overview_canvas.set_canvas_state(state.clone());
                         last_state.replace(Some(state));
                     }
                 }
@@ -122,8 +105,7 @@ fn build_ui(app: &adw::Application) {
     }
 
     if let Some(initial) = fetch_state_via_ipc() {
-        let cb = Rc::clone(&activate_cluster);
-        ui::render_clusters(&list, &initial, cb);
+        overview_canvas.set_canvas_state(initial.clone());
         last_state.replace(Some(initial));
     }
 }
