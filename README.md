@@ -16,7 +16,7 @@ Current workspace apps:
 
 At minimum, you need:
 
-- Rust toolchain (stable)
+- Rust toolchain (stable, currently validated with **1.85.x**)
 - `sway`
 - GTK 4 + libadwaita development libraries
 - layer-shell GTK bindings dependencies
@@ -51,6 +51,14 @@ sudo apt install -y \
    ```bash
    rustup --version
    cargo --version
+   ```
+
+   This project expects the stable toolchain. To match CI exactly:
+
+   ```bash
+   rustup toolchain install stable
+   rustup default stable
+   rustup component add rustfmt clippy
    ```
 
 3. Build the workspace:
@@ -208,9 +216,11 @@ Notes:
 ## Useful development commands
 
 ```bash
-cargo check
-cargo fmt
-cargo clippy --workspace --all-targets
+just fmt-check
+just clippy
+just check
+just smoke-binaries
+just ci
 ```
 
 ---
