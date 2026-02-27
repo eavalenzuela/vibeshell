@@ -605,17 +605,50 @@ fn collect_windows_from_tree(
             .as_ref()
             .and_then(|props| props.transient_for)
             .map(|id| id as WindowId);
+        let app_id_lower = app_id.as_deref().map(str::to_ascii_lowercase);
+        let class_lower = class.as_deref().map(str::to_ascii_lowercase);
+        let title_lower = title.to_ascii_lowercase();
+        let has_overlay_hint = ["overlay", "popup"]
+            .iter()
+            .any(|hint| title_lower.contains(hint))
+            || app_id_lower
+                .as_deref()
+                .is_some_and(|value| value.contains("overlay") || value.contains("popup"))
+            || class_lower
+                .as_deref()
+                .is_some_and(|value| value.contains("overlay") || value.contains("popup"));
+
+        let exclusion_reason = if node.fullscreen_mode.unwrap_or(0) > 0 {
+            Some("fullscreen_temporary_override")
+        } else if transient_for.is_some() {
+            Some("transient_dialog_attached_to_parent")
+        } else if has_overlay_hint {
+            Some("overlay_or_popup")
+        } else {
+            None
+        };
+
+        if let Some(reason) = exclusion_reason {
+            info!(
+                window_id = node.id,
+                reason, "window excluded from cluster reflow/slot geometry policy"
+            );
+        }
+
+        let role = if has_overlay_hint {
+            WindowRole::Utility
+        } else if node.floating.is_some() || transient_for.is_some() {
+            WindowRole::Dialog
+        } else {
+            WindowRole::Normal
+        };
 
         out.push(Window {
             id: node.id as WindowId,
             title: format!("{}{}", title, focused_suffix),
             app_id,
             class,
-            role: if node.floating.is_some() {
-                WindowRole::Dialog
-            } else {
-                WindowRole::Normal
-            },
+            role,
             state: if node.fullscreen_mode.unwrap_or(0) > 0 {
                 WindowState::Fullscreen
             } else if node.floating.is_some() {
@@ -626,7 +659,7 @@ fn collect_windows_from_tree(
             cluster_id,
             transient_for,
             manual_cluster_override: false,
-            manual_position_override: false,
+            manual_position_override: exclusion_reason.is_some(),
         });
     }
 
