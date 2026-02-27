@@ -8,6 +8,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
 
+use crate::interaction::IpcMutation;
 use crate::interaction_state::{EscapeAction, InteractionEvent, InteractionMachine};
 
 const CARD_WIDTH: f64 = 320.0;
@@ -17,17 +18,36 @@ const SCROLL_ZOOM_STEP: f64 = 1.10;
 const MIN_SCALE: f64 = 0.2;
 const MAX_SCALE: f64 = 6.0;
 const KEY_PAN_STEP: f64 = 48.0;
+const KEY_MOVE_STEP: f64 = 32.0;
+const KEY_MOVE_STEP_LARGE: f64 = 128.0;
 
 pub struct OverviewCanvas {
+    root: gtk::Box,
     area: gtk::DrawingArea,
+    status_label: gtk::Label,
     data: Rc<RefCell<WidgetState>>,
 }
 
 #[derive(Clone)]
 enum DragMode {
-    PendingCluster { cluster_id: ClusterId },
-    DraggingCluster { cluster_id: ClusterId },
-    Panning { viewport_start: (f64, f64) },
+    PendingCluster {
+        cluster_id: ClusterId,
+        start_canvas_x: f64,
+        start_canvas_y: f64,
+    },
+    DraggingCluster {
+        cluster_id: ClusterId,
+        start_canvas_x: f64,
+        start_canvas_y: f64,
+    },
+    Panning {
+        viewport_start: (f64, f64),
+    },
+}
+
+#[derive(Clone, Copy)]
+enum MoveMode {
+    Keyboard { cluster_id: ClusterId },
 }
 
 struct WidgetState {
@@ -35,6 +55,7 @@ struct WidgetState {
     selected_cluster: Option<ClusterId>,
     cluster_offsets: HashMap<ClusterId, (f64, f64)>,
     drag_mode: Option<DragMode>,
+    move_mode: Option<MoveMode>,
     interaction: InteractionMachine,
 }
 
@@ -43,7 +64,25 @@ impl OverviewCanvas {
         on_activate: Rc<dyn Fn(ClusterId)>,
         on_dive: Rc<dyn Fn(ClusterId)>,
         on_zoom_back: Rc<dyn Fn()>,
+        on_mutation: Rc<dyn Fn(IpcMutation)>,
     ) -> Self {
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(8)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+
+        let status_label = gtk::Label::builder()
+            .xalign(0.0)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(8)
+            .margin_bottom(4)
+            .build();
+        status_label.set_wrap(true);
+        status_label.set_accessible_role(gtk::AccessibleRole::Status);
+
         let area = gtk::DrawingArea::builder()
             .hexpand(true)
             .vexpand(true)
@@ -55,6 +94,7 @@ impl OverviewCanvas {
             selected_cluster: None,
             cluster_offsets: HashMap::new(),
             drag_mode: None,
+            move_mode: None,
             interaction: InteractionMachine::default(),
         }));
 
@@ -70,8 +110,10 @@ impl OverviewCanvas {
         click.set_button(gdk::BUTTON_PRIMARY);
         click.connect_pressed({
             let area = area.clone();
+            let status_label = status_label.clone();
             let data = Rc::clone(&data);
             let on_dive = Rc::clone(&on_dive);
+            let on_mutation = Rc::clone(&on_mutation);
             move |gesture, n_press, x, y| {
                 let modifiers = gesture.current_event_state();
                 let mut state = data.borrow_mut();
@@ -87,9 +129,14 @@ impl OverviewCanvas {
                     return;
                 }
 
+                state.move_mode = None;
+
                 if let Some(cluster_id) = hit {
                     state.selected_cluster = Some(cluster_id);
                     state.interaction.on_event(InteractionEvent::ClickCluster);
+                    on_mutation(IpcMutation::SelectCluster {
+                        cluster: cluster_id,
+                    });
                     if modifiers.contains(gdk::ModifierType::SHIFT_MASK) {
                         state.interaction.on_event(InteractionEvent::DragStartPan);
                         state.drag_mode = Some(DragMode::Panning {
@@ -99,7 +146,11 @@ impl OverviewCanvas {
                             ),
                         });
                     } else {
-                        state.drag_mode = Some(DragMode::PendingCluster { cluster_id });
+                        state.drag_mode = Some(DragMode::PendingCluster {
+                            cluster_id,
+                            start_canvas_x: x,
+                            start_canvas_y: y,
+                        });
                     }
                 } else {
                     state.selected_cluster = None;
@@ -115,14 +166,19 @@ impl OverviewCanvas {
                     });
                 }
 
+                update_status(&state, &status_label);
                 area.grab_focus();
                 area.queue_draw();
             }
         });
         click.connect_released({
             let data = Rc::clone(&data);
+            let on_mutation = Rc::clone(&on_mutation);
             move |_, _, _, _| {
                 let mut state = data.borrow_mut();
+                if matches!(state.drag_mode, Some(DragMode::DraggingCluster { .. })) {
+                    on_mutation(IpcMutation::CommitClusterDrag);
+                }
                 if matches!(
                     state.drag_mode,
                     Some(DragMode::DraggingCluster { .. }) | Some(DragMode::Panning { .. })
@@ -138,7 +194,9 @@ impl OverviewCanvas {
         drag.set_button(gdk::BUTTON_PRIMARY);
         drag.connect_drag_update({
             let area = area.clone();
+            let status_label = status_label.clone();
             let data = Rc::clone(&data);
+            let on_mutation = Rc::clone(&on_mutation);
             move |_, dx, dy| {
                 let mut state = data.borrow_mut();
                 let Some(mode) = state.drag_mode.clone() else {
@@ -146,7 +204,11 @@ impl OverviewCanvas {
                 };
 
                 match mode {
-                    DragMode::PendingCluster { cluster_id } => {
+                    DragMode::PendingCluster {
+                        cluster_id,
+                        start_canvas_x,
+                        start_canvas_y,
+                    } => {
                         let distance = (dx * dx + dy * dy).sqrt();
                         if distance < DRAG_THRESHOLD_PX {
                             return;
@@ -154,10 +216,36 @@ impl OverviewCanvas {
                         state
                             .interaction
                             .on_event(InteractionEvent::DragStartCluster);
-                        state.drag_mode = Some(DragMode::DraggingCluster { cluster_id });
+                        state.drag_mode = Some(DragMode::DraggingCluster {
+                            cluster_id,
+                            start_canvas_x,
+                            start_canvas_y,
+                        });
+                        on_mutation(IpcMutation::BeginClusterDrag {
+                            cluster: cluster_id,
+                            pointer_canvas_x: start_canvas_x,
+                            pointer_canvas_y: start_canvas_y,
+                            base_revision: state.canvas_state.state_revision,
+                        });
+                        let pointer_canvas_x = start_canvas_x + dx;
+                        let pointer_canvas_y = start_canvas_y + dy;
+                        on_mutation(IpcMutation::UpdateClusterDrag {
+                            pointer_canvas_x,
+                            pointer_canvas_y,
+                        });
                         apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);
                     }
-                    DragMode::DraggingCluster { cluster_id } => {
+                    DragMode::DraggingCluster {
+                        cluster_id,
+                        start_canvas_x,
+                        start_canvas_y,
+                    } => {
+                        let pointer_canvas_x = start_canvas_x + dx;
+                        let pointer_canvas_y = start_canvas_y + dy;
+                        on_mutation(IpcMutation::UpdateClusterDrag {
+                            pointer_canvas_x,
+                            pointer_canvas_y,
+                        });
                         apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);
                     }
                     DragMode::Panning { viewport_start } => {
@@ -167,12 +255,18 @@ impl OverviewCanvas {
                         area.queue_draw();
                     }
                 }
+
+                update_status(&state, &status_label);
             }
         });
         drag.connect_drag_end({
             let data = Rc::clone(&data);
+            let on_mutation = Rc::clone(&on_mutation);
             move |_, _, _| {
                 let mut state = data.borrow_mut();
+                if matches!(state.drag_mode, Some(DragMode::DraggingCluster { .. })) {
+                    on_mutation(IpcMutation::CommitClusterDrag);
+                }
                 if state.drag_mode.is_some() {
                     state.interaction.on_event(InteractionEvent::DragRelease);
                 }
@@ -205,13 +299,90 @@ impl OverviewCanvas {
         let key = gtk::EventControllerKey::new();
         key.connect_key_pressed({
             let area = area.clone();
+            let status_label = status_label.clone();
             let data = Rc::clone(&data);
             let on_activate = Rc::clone(&on_activate);
             let on_zoom_back = Rc::clone(&on_zoom_back);
-            move |_, keyval, _, _| {
+            let on_mutation = Rc::clone(&on_mutation);
+            move |_, keyval, _, modifiers| {
                 let mut state = data.borrow_mut();
                 let viewport = &mut state.canvas_state.viewport;
+                let large_step = modifiers.contains(gdk::ModifierType::SHIFT_MASK);
+
+                if matches!(state.move_mode, Some(MoveMode::Keyboard { .. })) {
+                    let step = if large_step {
+                        KEY_MOVE_STEP_LARGE
+                    } else {
+                        KEY_MOVE_STEP
+                    };
+                    match keyval {
+                        gdk::Key::Up | gdk::Key::Down | gdk::Key::Left | gdk::Key::Right => {
+                            let (dx, dy) = match keyval {
+                                gdk::Key::Up => (0.0, -step),
+                                gdk::Key::Down => (0.0, step),
+                                gdk::Key::Left => (-step, 0.0),
+                                gdk::Key::Right => (step, 0.0),
+                                _ => (0.0, 0.0),
+                            };
+                            if let Some(cluster_id) = state.selected_cluster {
+                                on_mutation(IpcMutation::KeyboardMoveBy { dx, dy });
+                                let entry = state
+                                    .cluster_offsets
+                                    .entry(cluster_id)
+                                    .or_insert((0.0, 0.0));
+                                entry.0 += dx;
+                                entry.1 += dy;
+                            }
+                            update_status(&state, &status_label);
+                            area.queue_draw();
+                            return glib::Propagation::Stop;
+                        }
+                        gdk::Key::Return => {
+                            on_mutation(IpcMutation::CommitKeyboardMove);
+                            state.move_mode = None;
+                            state.cluster_offsets.clear();
+                            update_status(&state, &status_label);
+                            area.queue_draw();
+                            return glib::Propagation::Stop;
+                        }
+                        gdk::Key::Escape => {
+                            on_mutation(IpcMutation::CancelKeyboardMove);
+                            state.move_mode = None;
+                            state.cluster_offsets.clear();
+                            update_status(&state, &status_label);
+                            area.queue_draw();
+                            return glib::Propagation::Stop;
+                        }
+                        _ => {}
+                    }
+                }
+
                 match keyval {
+                    gdk::Key::Tab => {
+                        traverse_selection(&mut state, 1, &on_mutation);
+                        update_status(&state, &status_label);
+                        area.queue_draw();
+                        glib::Propagation::Stop
+                    }
+                    gdk::Key::ISO_Left_Tab => {
+                        traverse_selection(&mut state, -1, &on_mutation);
+                        update_status(&state, &status_label);
+                        area.queue_draw();
+                        glib::Propagation::Stop
+                    }
+                    gdk::Key::m | gdk::Key::M => {
+                        if let Some(cluster_id) = state.selected_cluster {
+                            on_mutation(IpcMutation::EnterKeyboardMoveMode {
+                                cluster: cluster_id,
+                            });
+                            state.move_mode = Some(MoveMode::Keyboard { cluster_id });
+                            update_status(&state, &status_label);
+                            area.queue_draw();
+                            glib::Propagation::Stop
+                        } else {
+                            glib::Propagation::Proceed
+                        }
+                    }
                     gdk::Key::plus | gdk::Key::equal => {
                         viewport.scale =
                             (viewport.scale * SCROLL_ZOOM_STEP).clamp(MIN_SCALE, MAX_SCALE);
@@ -255,6 +426,10 @@ impl OverviewCanvas {
                         let transient_overlay_open = state.selected_cluster.is_some();
                         match state.interaction.handle_escape(transient_overlay_open) {
                             EscapeAction::CancelDrag => {
+                                if matches!(state.drag_mode, Some(DragMode::DraggingCluster { .. }))
+                                {
+                                    on_mutation(IpcMutation::CancelClusterDrag);
+                                }
                                 state.drag_mode = None;
                                 area.queue_draw();
                             }
@@ -267,6 +442,7 @@ impl OverviewCanvas {
                             }
                             EscapeAction::None => {}
                         }
+                        update_status(&state, &status_label);
                         glib::Propagation::Stop
                     }
                     _ => glib::Propagation::Proceed,
@@ -275,11 +451,24 @@ impl OverviewCanvas {
         });
         area.add_controller(key);
 
-        Self { area, data }
+        root.append(&status_label);
+        root.append(&area);
+
+        {
+            let state = data.borrow();
+            update_status(&state, &status_label);
+        }
+
+        Self {
+            root,
+            area,
+            status_label,
+            data,
+        }
     }
 
-    pub fn widget(&self) -> &gtk::DrawingArea {
-        &self.area
+    pub fn widget(&self) -> &gtk::Box {
+        &self.root
     }
 
     pub fn set_canvas_state(&self, state: CanvasState) {
@@ -294,6 +483,7 @@ impl OverviewCanvas {
             .any(|cluster| Some(cluster.id) == data.selected_cluster)
         {
             data.selected_cluster = None;
+            data.move_mode = None;
         }
 
         data.cluster_offsets.retain(|cluster_id, _| {
@@ -303,6 +493,7 @@ impl OverviewCanvas {
                 .any(|c| c.id == *cluster_id)
         });
 
+        update_status(&data, &self.status_label);
         self.area.queue_draw();
     }
 }
@@ -335,6 +526,77 @@ fn apply_cluster_drag(
     entry.1 = world_dy;
 
     area.queue_draw();
+}
+
+fn update_status(state: &WidgetState, label: &gtk::Label) {
+    let mut parts = Vec::new();
+    if let Some(cluster_id) = state.selected_cluster {
+        if let Some(cluster) = state
+            .canvas_state
+            .clusters
+            .iter()
+            .find(|c| c.id == cluster_id)
+        {
+            let offset = state
+                .cluster_offsets
+                .get(&cluster_id)
+                .copied()
+                .unwrap_or((0.0, 0.0));
+            let x = cluster.x + offset.0;
+            let y = cluster.y + offset.1;
+            parts.push(format!(
+                "Selected: {} ({}) @ ({x:.0}, {y:.0})",
+                cluster.name, cluster.id
+            ));
+        }
+    } else {
+        parts.push("Selected: none".to_owned());
+    }
+
+    match state.move_mode {
+        Some(MoveMode::Keyboard { .. }) => {
+            parts.push("Move mode: ON (Arrows move 32px, Shift+Arrow move 128px, Enter commit, Esc cancel)".to_owned());
+        }
+        None => {
+            parts.push("Move mode: OFF (Tab/Shift+Tab traverse, M enters move mode)".to_owned());
+        }
+    }
+
+    let text = parts.join("  •  ");
+    label.set_text(&text);
+    label.set_tooltip_text(Some(&text));
+}
+
+fn traverse_selection(
+    state: &mut WidgetState,
+    direction: isize,
+    on_mutation: &Rc<dyn Fn(IpcMutation)>,
+) {
+    if state.canvas_state.clusters.is_empty() {
+        state.selected_cluster = None;
+        return;
+    }
+
+    let len = state.canvas_state.clusters.len() as isize;
+    let current = state
+        .selected_cluster
+        .and_then(|id| {
+            state
+                .canvas_state
+                .clusters
+                .iter()
+                .position(|cluster| cluster.id == id)
+        })
+        .map(|idx| idx as isize)
+        .unwrap_or(0);
+
+    let next = (current + direction).rem_euclid(len) as usize;
+    let cluster_id = state.canvas_state.clusters[next].id;
+    state.selected_cluster = Some(cluster_id);
+    state.interaction.on_event(InteractionEvent::ClickCluster);
+    on_mutation(IpcMutation::SelectCluster {
+        cluster: cluster_id,
+    });
 }
 
 fn draw_canvas(state: &WidgetState, cr: &gtk::cairo::Context, width: f64, height: f64) {
