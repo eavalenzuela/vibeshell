@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
@@ -69,6 +70,7 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
     let audio = gtk::Label::new(Some("🔇 audio N/A"));
     let network = gtk::Label::new(Some("📶 network N/A"));
     let battery = gtk::Label::new(Some("🔋 battery N/A"));
+    let power = gtk::Label::new(Some("⏻"));
 
     let right_section = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -80,6 +82,7 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
     right_section.append(&network);
     right_section.append(&battery);
     right_section.append(&clock);
+    right_section.append(&power);
 
     let content = gtk::CenterBox::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -90,6 +93,56 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
     content.set_end_widget(Some(&right_section));
 
     window.set_content(Some(&content));
+
+    let calendar = gtk::Calendar::new();
+    let calendar_popover = gtk::Popover::builder()
+        .autohide(true)
+        .has_arrow(true)
+        .build();
+    calendar_popover.set_child(Some(&calendar));
+    calendar_popover.set_parent(&clock);
+
+    let clock_click = gtk::GestureClick::new();
+    {
+        let calendar_popover = calendar_popover.clone();
+        clock_click.connect_pressed(move |_, _, _, _| {
+            calendar_popover.popup();
+        });
+    }
+    clock.add_controller(clock_click);
+
+    let audio_click = gtk::GestureClick::new();
+    {
+        let mixer_command = panel_config.audio_mixer_command.clone();
+        let toggle_command = panel_config.audio_toggle_command.clone();
+        audio_click.connect_pressed(move |_, _, _, _| {
+            if let Some(command) = mixer_command.as_deref() {
+                run_configured_command(command, "audio mixer");
+            } else {
+                run_configured_command(&toggle_command, "audio toggle");
+            }
+        });
+    }
+    audio.add_controller(audio_click);
+
+    let network_click = gtk::GestureClick::new();
+    {
+        let network_command = panel_config.network_settings_command.clone();
+        network_click.connect_pressed(move |_, _, _, _| {
+            run_configured_command(&network_command, "network settings");
+        });
+    }
+    network.add_controller(network_click);
+
+    let power_click = gtk::GestureClick::new();
+    {
+        let power_command = panel_config.power_menu_command.clone();
+        power_click.connect_pressed(move |_, _, _, _| {
+            run_configured_command(&power_command, "power menu");
+        });
+    }
+    power.add_controller(power_click);
+
     window.present();
 
     let clock_format = panel_config.clock_format.clone();
@@ -213,6 +266,22 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
 
         glib::ControlFlow::Continue
     });
+}
+
+fn run_configured_command(command: &str, action: &str) {
+    if command.trim().is_empty() {
+        tracing::warn!(action, "configured command is empty; ignoring click action");
+        return;
+    }
+
+    if let Err(error) = Command::new("sh").args(["-c", command]).spawn() {
+        tracing::warn!(
+            ?error,
+            action,
+            command,
+            "failed to launch configured command"
+        );
+    }
 }
 
 fn apply_state(workspaces_label: &gtk::Label, title_label: &gtk::Label, state: &PanelState) {
