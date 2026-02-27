@@ -35,6 +35,10 @@ pub struct PanelConfig {
     pub margin_end: i32,
     pub clock_format: String,
     pub status_poll_interval_ms: u64,
+    pub audio_toggle_command: String,
+    pub audio_mixer_command: Option<String>,
+    pub network_settings_command: String,
+    pub power_menu_command: String,
 }
 
 impl Default for PanelConfig {
@@ -45,6 +49,10 @@ impl Default for PanelConfig {
             margin_end: 12,
             clock_format: "%H:%M".to_owned(),
             status_poll_interval_ms: 5_000,
+            audio_toggle_command: "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle".to_owned(),
+            audio_mixer_command: None,
+            network_settings_command: "nm-connection-editor".to_owned(),
+            power_menu_command: "wlogout".to_owned(),
         }
     }
 }
