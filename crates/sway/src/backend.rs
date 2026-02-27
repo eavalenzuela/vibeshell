@@ -1,8 +1,148 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 pub type ClusterId = i64;
 pub type WindowId = i64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMetadata {
+    pub id: Option<i64>,
+    pub num: Option<i32>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceTransitionController {
+    continuum_workspace: String,
+    original_workspace_by_window: HashMap<WindowId, WorkspaceMetadata>,
+}
+
+impl WorkspaceTransitionController {
+    pub fn new(continuum_workspace: impl Into<String>) -> Self {
+        Self {
+            continuum_workspace: continuum_workspace.into(),
+            original_workspace_by_window: HashMap::new(),
+        }
+    }
+
+    pub fn enter_cluster_zoom(
+        &mut self,
+        target_windows: &[WindowId],
+        workspace_by_window: &HashMap<WindowId, WorkspaceMetadata>,
+    ) -> Vec<String> {
+        tracing::info!(
+            stage = "enter_cluster_zoom",
+            target_windows = target_windows.len(),
+            tracked_windows = self.original_workspace_by_window.len(),
+            continuum_workspace = self.continuum_workspace.as_str(),
+            "starting cluster zoom transition"
+        );
+
+        let mut commands = Vec::new();
+        for window_id in target_windows {
+            let Some(workspace) = workspace_by_window.get(window_id) else {
+                tracing::warn!(
+                    stage = "enter_cluster_zoom",
+                    window_id,
+                    "unable to move window to continuum workspace because current workspace metadata is missing"
+                );
+                continue;
+            };
+
+            self.original_workspace_by_window
+                .entry(*window_id)
+                .or_insert_with(|| workspace.clone());
+
+            if let Some(command) = self.move_to_continuum(*window_id, workspace) {
+                commands.push(command);
+            }
+        }
+
+        commands
+    }
+
+    fn move_to_continuum(
+        &self,
+        window_id: WindowId,
+        workspace: &WorkspaceMetadata,
+    ) -> Option<String> {
+        let already_on_continuum = workspace.name == self.continuum_workspace;
+
+        tracing::info!(
+            stage = "move_to_continuum",
+            window_id,
+            source_workspace = workspace.name.as_str(),
+            continuum_workspace = self.continuum_workspace.as_str(),
+            already_on_continuum,
+            "evaluating move to continuum workspace"
+        );
+
+        (!already_on_continuum).then(|| {
+            let continuum_workspace = self.continuum_workspace.replace('"', "\\\"");
+            format!("[con_id={window_id}] move container to workspace \"{continuum_workspace}\"")
+        })
+    }
+
+    pub fn restore_workspace(
+        &mut self,
+        window_ids: &[WindowId],
+        live_windows: &HashSet<WindowId>,
+    ) -> Vec<String> {
+        tracing::info!(
+            stage = "restore_workspace",
+            requested_windows = window_ids.len(),
+            tracked_windows = self.original_workspace_by_window.len(),
+            "restoring pre-zoom workspace placements"
+        );
+
+        let mut commands = Vec::new();
+
+        for window_id in window_ids {
+            if !live_windows.contains(window_id) {
+                self.original_workspace_by_window.remove(window_id);
+                tracing::info!(
+                    stage = "restore_workspace",
+                    window_id,
+                    "window no longer exists; pruned stale restore entry"
+                );
+                continue;
+            }
+
+            let Some(original_workspace) = self.original_workspace_by_window.remove(window_id)
+            else {
+                tracing::debug!(
+                    stage = "restore_workspace",
+                    window_id,
+                    "no tracked workspace metadata for window; skipping restore"
+                );
+                continue;
+            };
+
+            let command = match original_workspace.num {
+                Some(num) => {
+                    format!("[con_id={window_id}] move container to workspace number {num}")
+                }
+                None => {
+                    let escaped = original_workspace.name.replace('"', "\\\"");
+                    format!("[con_id={window_id}] move container to workspace \"{escaped}\"")
+                }
+            };
+            commands.push(command);
+        }
+
+        self.prune_stale_entries(live_windows);
+        commands
+    }
+
+    pub fn prune_stale_entries(&mut self, live_windows: &HashSet<WindowId>) {
+        self.original_workspace_by_window
+            .retain(|window_id, _| live_windows.contains(window_id));
+    }
+
+    pub fn tracked_windows(&self) -> &HashMap<WindowId, WorkspaceMetadata> {
+        &self.original_workspace_by_window
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -418,5 +558,69 @@ mod tests {
         };
 
         assert_eq!(canonical_cluster_window_order(&cluster), vec![7, 9, 8]);
+    }
+
+    #[test]
+    fn enter_cluster_zoom_tracks_original_workspace_and_builds_move_commands() {
+        let mut controller = WorkspaceTransitionController::new("__continuum");
+        let workspace_by_window = HashMap::from([
+            (
+                10,
+                WorkspaceMetadata {
+                    id: Some(1),
+                    num: Some(1),
+                    name: "1:web".into(),
+                },
+            ),
+            (
+                11,
+                WorkspaceMetadata {
+                    id: Some(2),
+                    num: None,
+                    name: "__continuum".into(),
+                },
+            ),
+        ]);
+
+        let commands = controller.enter_cluster_zoom(&[10, 11, 12], &workspace_by_window);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0],
+            "[con_id=10] move container to workspace \"__continuum\""
+        );
+        assert_eq!(controller.tracked_windows().len(), 2);
+    }
+
+    #[test]
+    fn restore_workspace_moves_live_windows_back_and_prunes_stale_entries() {
+        let mut controller = WorkspaceTransitionController::new("__continuum");
+        let workspace_by_window = HashMap::from([
+            (
+                20,
+                WorkspaceMetadata {
+                    id: Some(1),
+                    num: Some(2),
+                    name: "2:code".into(),
+                },
+            ),
+            (
+                21,
+                WorkspaceMetadata {
+                    id: Some(2),
+                    num: None,
+                    name: "scratch".into(),
+                },
+            ),
+        ]);
+        controller.enter_cluster_zoom(&[20, 21], &workspace_by_window);
+
+        let live_windows = HashSet::from([20]);
+        let commands = controller.restore_workspace(&[20, 21], &live_windows);
+
+        assert_eq!(
+            commands,
+            vec!["[con_id=20] move container to workspace number 2"]
+        );
+        assert!(controller.tracked_windows().is_empty());
     }
 }
