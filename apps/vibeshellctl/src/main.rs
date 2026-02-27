@@ -164,6 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Ipc { command } => ipc(command)?,
     }
 
+    with_state_owner(|owner| owner.flush_pending_persistence());
     Ok(())
 }
 
