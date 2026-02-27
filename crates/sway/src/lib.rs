@@ -1,4 +1,4 @@
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
@@ -24,6 +24,11 @@ pub struct PanelState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelUpdate {
     Snapshot(PanelState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwaySignal {
+    WorkspaceOrWindow,
 }
 
 pub struct SwayClient {
@@ -76,42 +81,12 @@ impl SwayClient {
             let _ = tx.send(PanelUpdate::Snapshot(initial));
         }
 
-        let (event_tx, event_rx) = mpsc::channel();
-        thread::spawn(move || {
-            let connection = match Connection::new() {
-                Ok(connection) => connection,
-                Err(error) => {
-                    tracing::warn!(?error, "failed to connect event stream");
-                    return;
-                }
-            };
-
-            let mut events = match connection.subscribe([EventType::Workspace, EventType::Window]) {
-                Ok(events) => events,
-                Err(error) => {
-                    tracing::warn!(?error, "failed to subscribe to sway events");
-                    return;
-                }
-            };
-
-            for event in &mut events {
-                if event.is_err() || event_tx.send(()).is_err() {
-                    break;
-                }
-            }
-        });
+        let event_rx = spawn_event_stream();
+        let normalized_rx = spawn_normalized_stream(event_rx, debounce_window);
 
         loop {
-            if event_rx.recv().is_err() {
+            if normalized_rx.recv().is_err() {
                 break;
-            }
-
-            loop {
-                match event_rx.recv_timeout(debounce_window) {
-                    Ok(()) => continue,
-                    Err(RecvTimeoutError::Timeout) => break,
-                    Err(RecvTimeoutError::Disconnected) => return Ok(()),
-                }
             }
 
             let state = snapshot_client.snapshot()?;
@@ -122,6 +97,66 @@ impl SwayClient {
 
         Ok(())
     }
+}
+
+pub fn spawn_event_stream() -> Receiver<SwaySignal> {
+    let (event_tx, event_rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let connection = match Connection::new() {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::warn!(?error, "failed to connect event stream");
+                return;
+            }
+        };
+
+        let mut events = match connection.subscribe([EventType::Workspace, EventType::Window]) {
+            Ok(events) => events,
+            Err(error) => {
+                tracing::warn!(?error, "failed to subscribe to sway events");
+                return;
+            }
+        };
+
+        for event in &mut events {
+            if event.is_err() || event_tx.send(SwaySignal::WorkspaceOrWindow).is_err() {
+                break;
+            }
+        }
+    });
+
+    event_rx
+}
+
+pub fn spawn_normalized_stream(
+    event_rx: Receiver<SwaySignal>,
+    debounce_window: Duration,
+) -> Receiver<SwaySignal> {
+    let (normalized_tx, normalized_rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        while let Ok(event) = event_rx.recv() {
+            let mut latest_event = event;
+
+            loop {
+                match event_rx.recv_timeout(debounce_window) {
+                    Ok(next_event) => latest_event = next_event,
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        let _ = normalized_tx.send(latest_event);
+                        return;
+                    }
+                }
+            }
+
+            if normalized_tx.send(latest_event).is_err() {
+                break;
+            }
+        }
+    });
+
+    normalized_rx
 }
 
 fn find_focused_title(node: &Node) -> Option<String> {

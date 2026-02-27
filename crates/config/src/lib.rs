@@ -41,6 +41,7 @@ pub struct PanelConfig {
     pub margin_end: i32,
     pub clock_format: String,
     pub status_poll_interval_ms: u64,
+    pub sway_event_debounce_ms: u64,
     pub network_settings_command: String,
 }
 
@@ -52,6 +53,7 @@ impl Default for PanelConfig {
             margin_end: 12,
             clock_format: "%H:%M".to_owned(),
             status_poll_interval_ms: 5_000,
+            sway_event_debounce_ms: 80,
             network_settings_command: "nm-connection-editor".to_owned(),
         }
     }
@@ -282,6 +284,9 @@ impl Config {
         }
         if self.panel.clock_format.trim().is_empty() {
             issues.push("panel.clock_format cannot be empty".to_owned());
+        }
+        if self.panel.sway_event_debounce_ms < 20 {
+            issues.push("panel.sway_event_debounce_ms must be >= 20".to_owned());
         }
         if self.launcher.window_width <= 0 || self.launcher.window_height <= 0 {
             issues.push(
