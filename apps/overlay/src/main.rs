@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use adw::prelude::*;
-use common::contracts::{CanvasState, IpcResponse};
+use common::contracts::{CanvasState, ClusterId, IpcResponse};
 use gtk::glib;
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
@@ -88,7 +88,7 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
-    let activate_cluster = Rc::new(|cluster_id| {
+    let activate_cluster = Rc::new(|cluster_id: ClusterId| {
         let status = Command::new("vibeshellctl")
             .args(["ipc", "activate-cluster", &cluster_id.to_string()])
             .status();
