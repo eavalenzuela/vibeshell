@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v vibeshellctl >/dev/null 2>&1; then
+  exec vibeshellctl logout
+fi
+
+if command -v swaymsg >/dev/null 2>&1; then
+  exec swaymsg exit
+fi
+
+echo "Unable to log out: neither vibeshellctl nor swaymsg is available in PATH." >&2
+exit 1

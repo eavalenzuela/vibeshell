@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+MODE="system"
+if [[ "${1:-}" == "--user" ]]; then
+  MODE="user"
+elif [[ "${1:-}" == "--system" || -z "${1:-}" ]]; then
+  MODE="system"
+else
+  echo "Usage: $0 [--system|--user]" >&2
+  exit 1
+fi
+
+if [[ "${MODE}" == "system" ]]; then
+  BIN_DIR="/usr/local/bin"
+  SESSION_DIR="/usr/share/wayland-sessions"
+else
+  BIN_DIR="${HOME}/.local/bin"
+  SESSION_DIR="${HOME}/.local/share/wayland-sessions"
+fi
+
+RUNNER_PATH="${BIN_DIR}/vibeshell-session"
+DESKTOP_PATH="${SESSION_DIR}/vibeshell.desktop"
+
+mkdir -p "${BIN_DIR}" "${SESSION_DIR}"
+
+cat > "${RUNNER_PATH}" <<RUNNER
+#!/usr/bin/env bash
+set -euo pipefail
+exec "${PROJECT_ROOT}/scripts/start-sway-session"
+RUNNER
+chmod +x "${RUNNER_PATH}"
+
+cat > "${DESKTOP_PATH}" <<DESKTOP
+[Desktop Entry]
+Name=Vibeshell
+Comment=Vibeshell Wayland session
+Exec=${RUNNER_PATH}
+Type=Application
+DesktopNames=Vibeshell
+DESKTOP
+
+printf 'Installed runner: %s\n' "${RUNNER_PATH}"
+printf 'Installed session entry: %s\n' "${DESKTOP_PATH}"
+printf 'On the Ubuntu login screen, use the gear icon and choose "Vibeshell" before signing in.\n'
