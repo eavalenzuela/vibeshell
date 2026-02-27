@@ -85,6 +85,20 @@ or via `just`:
 just run-nested
 ```
 
+If you hit `compositor doesn't support zwlr_layer_shell_v1` while nesting under another compositor, force wlroots to use the X11 nested backend (this is the most reliable workaround for hosts that do not expose layer-shell to nested Wayland clients):
+
+```bash
+VIBESHELL_NESTED_BACKEND=x11 ./scripts/run-in-nested-sway
+# or auto-pick x11 when both DISPLAY and WAYLAND_DISPLAY are present
+VIBESHELL_NESTED_BACKEND=auto ./scripts/run-in-nested-sway
+```
+
+Backend options for `run-in-nested-sway`:
+
+- `VIBESHELL_NESTED_BACKEND=wayland` (default): nested Wayland backend.
+- `VIBESHELL_NESTED_BACKEND=x11`: nested X11 backend; recommended workaround for the layer-shell error.
+- `VIBESHELL_NESTED_BACKEND=auto`: prefers `x11` when both X11 and Wayland sessions are available, otherwise `wayland`.
+
 For display-manager style startup, use the same orchestration script directly:
 
 ```bash

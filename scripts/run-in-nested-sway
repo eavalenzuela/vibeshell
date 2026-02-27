@@ -8,6 +8,28 @@ export GDK_BACKEND=wayland
 export GTK_USE_PORTAL=1
 export MOZ_ENABLE_WAYLAND=1
 
+NESTED_BACKEND="${VIBESHELL_NESTED_BACKEND:-wayland}"
+
+case "${NESTED_BACKEND}" in
+  wayland)
+    export WLR_BACKENDS=wayland
+    ;;
+  x11)
+    export WLR_BACKENDS=x11
+    ;;
+  auto)
+    if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${DISPLAY:-}" ]]; then
+      export WLR_BACKENDS=x11
+    else
+      export WLR_BACKENDS=wayland
+    fi
+    ;;
+  *)
+    echo "Unsupported VIBESHELL_NESTED_BACKEND='${NESTED_BACKEND}'. Expected one of: wayland, x11, auto." >&2
+    exit 1
+    ;;
+esac
+
 log() {
   local level="$1"
   shift
@@ -33,6 +55,7 @@ trap 'forward_signal INT' INT
 trap 'forward_signal HUP' HUP
 
 log INFO "Started nested sway runner (pid=${SESSION_PID}, pgid=${SESSION_PGID})"
+log INFO "Using nested backend=${NESTED_BACKEND} (WLR_BACKENDS=${WLR_BACKENDS})"
 wait "${SESSION_PID}"
 STATUS=$?
 log INFO "Nested sway runner exited with status=${STATUS}"
