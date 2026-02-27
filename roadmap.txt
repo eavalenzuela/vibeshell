@@ -337,6 +337,68 @@ pan/zoom the overlay itself
 
 drag clusters around
 
+Phase 4 data contract
+
+Coordinate space
+
+Use world/canvas coordinates for cluster model data; treat screen pixels as a rendered projection only.
+
+Units are logical canvas units (device-independent), with +X to the right and +Y downward.
+
+Origin is canvas (0,0) at the initial overview center; viewport transforms map canvas coordinates to per-output screen space.
+
+Required cluster-card fields (overview)
+
+id: ClusterId (stable, unique)
+
+position: Vec2 (canvas x,y center for hit-testing and draw placement)
+
+size_or_radius: f32 or Vec2 (choose one canonical shape metric and keep it versioned)
+
+title: String (user-visible cluster name)
+
+window_count: u32 (number of windows currently assigned)
+
+active: bool (cluster matches active_cluster)
+
+focused: bool (cluster contains currently focused window)
+
+Overview viewport model
+
+center: Vec2 in canvas coordinates
+
+scale: f32 (canvas units to screen mapping)
+
+bounds: Rect in canvas coordinates for clamping/visibility logic
+
+per_output_viewport: Option<HashMap<OutputName, Viewport>> for multi-monitor overrides; default to global viewport when absent.
+
+Ownership and sync rules
+
+Daemon state is source of truth for cluster entities, positions, viewport, and focus/active flags.
+
+UI overlay owns only transient interaction state (hover, drag-in-progress, local animation/interpolation buffers).
+
+UI sends intent messages (begin-drag/update/end-drag, pan, zoom) and must reconcile to daemon-acknowledged state on every state tick.
+
+Persistence policy
+
+Save immediately on durable model edits: cluster create/delete/rename, cluster assignment changes, and drag end (final position commit).
+
+Save on debounce (e.g., 150–500 ms) for high-frequency viewport updates during pan/zoom.
+
+Force flush pending debounced state on clean daemon exit/shutdown.
+
+Conflict rules during drag
+
+While dragging, keep a base_version/model_revision from drag start.
+
+If external updates move the same cluster before drag end, apply deterministic resolution: last-writer-wins by revision/time and surface a brief UI indicator.
+
+If external updates affect other clusters, merge them live without interrupting current drag target.
+
+On drag end with stale base_version, either rebase delta onto latest position or reject with snap-back; pick one policy and keep it consistent.
+
 Add “snap-to” and inertial feel later (optional)
 
 Exit criteria: you can navigate primarily from overview without remembering numbers.
