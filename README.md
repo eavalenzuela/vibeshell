@@ -105,6 +105,26 @@ For display-manager style startup, use the same orchestration script directly:
 ./scripts/start-sway-session
 ```
 
+For Ubuntu login-screen integration (GDM), install the provided Wayland session entry:
+
+```bash
+# System-wide (recommended, run with sudo)
+sudo ./scripts/install-ubuntu-login-session --system
+
+# Or per-user
+./scripts/install-ubuntu-login-session --user
+```
+
+Then, at the Ubuntu login screen, click the gear icon and pick **Vibeshell** before signing in.
+
+To leave vibeshell and return to the Ubuntu login screen:
+
+```bash
+cargo run -p vibeshellctl -- logout
+# or
+./scripts/logout-to-login-screen
+```
+
 
 ### Sway keybinding generation
 
@@ -197,6 +217,7 @@ Subcommands:
 - `status` — reports whether `sway`, `panel`, `launcher`, and `notifd` are running.
 - `restart <component>` — stops and re-launches one component (`panel`, `launcher`, or `notifd`).
 - `logs <component>` — filters captured nested-session logs for one component.
+- `logout` — ends the current Sway session and returns to the display-manager login screen.
 
 Examples for nested Sway development:
 

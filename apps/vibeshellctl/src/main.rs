@@ -29,6 +29,8 @@ enum Commands {
     Restart { component: Component },
     /// Print component logs from a captured nested-session log file.
     Logs { component: Component },
+    /// End the current Sway session and return to the display manager login screen.
+    Logout,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -77,6 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Status => status()?,
         Commands::Restart { component } => restart(component)?,
         Commands::Logs { component } => logs(component)?,
+        Commands::Logout => logout()?,
     }
 
     Ok(())
@@ -148,6 +151,20 @@ fn restart(component: Component) -> Result<(), Box<dyn std::error::Error>> {
         .spawn()?;
 
     println!("started {process_name} (pid {}) via `{cmd}`", child.id());
+    Ok(())
+}
+
+fn logout() -> Result<(), Box<dyn std::error::Error>> {
+    let mut connection = Connection::new()?;
+    let replies = connection.run_command("exit")?;
+
+    for reply in replies {
+        if let Err(error) = reply {
+            return Err(format!("sway rejected exit command: {error}").into());
+        }
+    }
+
+    println!("logout requested");
     Ok(())
 }
 
