@@ -8,4 +8,32 @@ export GDK_BACKEND=wayland
 export GTK_USE_PORTAL=1
 export MOZ_ENABLE_WAYLAND=1
 
-exec "${PROJECT_ROOT}/scripts/start-sway-session"
+log() {
+  local level="$1"
+  shift
+  printf '[run-in-nested-sway] [%s] %s\n' "${level}" "$*"
+}
+
+START_CMD="${PROJECT_ROOT}/scripts/start-sway-session"
+
+setsid "${START_CMD}" &
+SESSION_PID=$!
+SESSION_PGID=$!
+
+forward_signal() {
+  local sig="$1"
+  if kill -0 "${SESSION_PID}" 2>/dev/null; then
+    log INFO "Forwarding ${sig} to start-sway-session process group (pgid=${SESSION_PGID})"
+    kill "-${sig}" -- "-${SESSION_PGID}" 2>/dev/null || true
+  fi
+}
+
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+
+log INFO "Started nested sway runner (pid=${SESSION_PID}, pgid=${SESSION_PGID})"
+wait "${SESSION_PID}"
+STATUS=$?
+log INFO "Nested sway runner exited with status=${STATUS}"
+exit "${STATUS}"

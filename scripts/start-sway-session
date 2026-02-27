@@ -10,6 +10,9 @@ SWAY_ONLY="${VIBESHELL_SWAY_ONLY:-0}"
 PANEL_CMD="${VIBESHELL_PANEL_CMD:-cargo run -p panel}"
 LAUNCHER_CMD="${VIBESHELL_LAUNCHER_CMD:-cargo run -p launcher}"
 NOTIFD_CMD="${VIBESHELL_NOTIFD_CMD:-cargo run -p notifd}"
+DEV_RESTART_MODE="${VIBESHELL_DEV_RESTART_MODE:-0}"
+RESTART_BACKOFF_SECONDS="${VIBESHELL_DEV_RESTART_BACKOFF_SECONDS:-2}"
+MAX_RESTART_BACKOFF_SECONDS="${VIBESHELL_DEV_RESTART_MAX_BACKOFF_SECONDS:-15}"
 
 SWAY_BINDINGS_OUTPUT="${VIBESHELL_SWAY_BINDINGS_OUTPUT:-${PROJECT_ROOT}/dev/sway.bindings.generated}"
 LAUNCHER_TOGGLE_KEY="${VIBESHELL_LAUNCHER_TOGGLE_KEY:-\$mod+space}"
@@ -59,29 +62,134 @@ fi
 
 mapfile -t PREEXISTING_WAYLAND_SOCKETS < <(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -type s -name 'wayland-*' -printf '%f\n' 2>/dev/null | sort)
 
+COMPONENT_NAMES=()
+COMPONENT_PIDS=()
 COMPONENT_PGIDS=()
+RESTART_COUNTS=()
+COMPONENT_CMDS=()
+SHUTTING_DOWN=0
 
-start_in_own_group() {
-  local cmd="$1"
-  setsid bash -lc "${cmd}" &
-  local pid=$!
-  COMPONENT_PGIDS+=("${pid}")
+log() {
+  local level="$1"
+  shift
+  printf '[start-sway-session] [%s] %s\n' "${level}" "$*"
 }
 
+
+start_component() {
+  local name="$1"
+  local cmd="$2"
+  local attempt="$3"
+
+  setsid bash -lc "${cmd}" &
+  local pid=$!
+
+  COMPONENT_NAMES+=("${name}")
+  COMPONENT_PIDS+=("${pid}")
+  COMPONENT_PGIDS+=("${pid}")
+  RESTART_COUNTS+=("${attempt}")
+  COMPONENT_CMDS+=("${cmd}")
+
+  log INFO "Started ${name} (pid=${pid}, pgid=${pid}, attempt=${attempt})"
+}
+
+stop_component_by_index() {
+  local idx="$1"
+  local reason="$2"
+  local name="${COMPONENT_NAMES[$idx]}"
+  local pid="${COMPONENT_PIDS[$idx]}"
+  local pgid="${COMPONENT_PGIDS[$idx]}"
+
+  log INFO "Stopping ${name} (pid=${pid}, pgid=${pgid}) due to ${reason}"
+  kill -TERM -- "-${pgid}" 2>/dev/null || true
+  kill -TERM -- "${pid}" 2>/dev/null || true
+
+  wait "${pid}" 2>/dev/null || true
+}
+
+remove_component_by_index() {
+  local idx="$1"
+  unset 'COMPONENT_NAMES[idx]'
+  unset 'COMPONENT_PIDS[idx]'
+  unset 'COMPONENT_PGIDS[idx]'
+  unset 'RESTART_COUNTS[idx]'
+  unset 'COMPONENT_CMDS[idx]'
+
+  COMPONENT_NAMES=("${COMPONENT_NAMES[@]}")
+  COMPONENT_PIDS=("${COMPONENT_PIDS[@]}")
+  COMPONENT_PGIDS=("${COMPONENT_PGIDS[@]}")
+  RESTART_COUNTS=("${RESTART_COUNTS[@]}")
+  COMPONENT_CMDS=("${COMPONENT_CMDS[@]}")
+}
+
+monitor_components() {
+  while [[ "${SHUTTING_DOWN}" == "0" ]]; do
+    local i
+    for i in "${!COMPONENT_PIDS[@]}"; do
+      local pid="${COMPONENT_PIDS[$i]}"
+      local name="${COMPONENT_NAMES[$i]}"
+
+      if ! kill -0 "${pid}" 2>/dev/null; then
+        local status=0
+        wait "${pid}" 2>/dev/null || status=$?
+
+        local restart_count="${RESTART_COUNTS[$i]}"
+        local cmd="${COMPONENT_CMDS[$i]}"
+        remove_component_by_index "${i}"
+
+        log ERROR "${name} exited unexpectedly with status=${status}"
+
+        if [[ "${DEV_RESTART_MODE}" == "1" && "${SHUTTING_DOWN}" == "0" ]]; then
+          local next_attempt=$((restart_count + 1))
+          local backoff=$((RESTART_BACKOFF_SECONDS * next_attempt))
+          if (( backoff > MAX_RESTART_BACKOFF_SECONDS )); then
+            backoff="${MAX_RESTART_BACKOFF_SECONDS}"
+          fi
+
+          log WARN "Restarting ${name} in ${backoff}s (attempt=${next_attempt})"
+          sleep "${backoff}"
+
+          if [[ "${SHUTTING_DOWN}" == "0" ]]; then
+            start_component "${name}" "${cmd}" "${next_attempt}"
+          fi
+        else
+          log WARN "${name} will not be restarted (VIBESHELL_DEV_RESTART_MODE=${DEV_RESTART_MODE})"
+        fi
+        break
+      fi
+    done
+
+    sleep 0.2
+  done
+}
+
+
 cleanup() {
+  SHUTTING_DOWN=1
   trap - EXIT INT TERM
 
-  for pgid in "${COMPONENT_PGIDS[@]:-}"; do
-    kill -TERM -- "-${pgid}" 2>/dev/null || true
-  done
+  log INFO "Shutting down session"
 
-  if [[ -n "${SWAY_PID:-}" ]] && kill -0 "${SWAY_PID}" 2>/dev/null; then
-    kill -TERM -- "${SWAY_PID}" 2>/dev/null || true
+  if [[ -n "${MONITOR_PID:-}" ]] && kill -0 "${MONITOR_PID}" 2>/dev/null; then
+    kill -TERM "${MONITOR_PID}" 2>/dev/null || true
+    wait "${MONITOR_PID}" 2>/dev/null || true
   fi
 
-  for pgid in "${COMPONENT_PGIDS[@]:-}"; do
-    wait "${pgid}" 2>/dev/null || true
+  local i
+  for i in "${!COMPONENT_PIDS[@]}"; do
+    stop_component_by_index "${i}" "session shutdown"
   done
+
+  COMPONENT_NAMES=()
+  COMPONENT_PIDS=()
+  COMPONENT_PGIDS=()
+  RESTART_COUNTS=()
+  COMPONENT_CMDS=()
+
+  if [[ -n "${SWAY_PID:-}" ]] && kill -0 "${SWAY_PID}" 2>/dev/null; then
+    log INFO "Stopping sway (pid=${SWAY_PID})"
+    kill -TERM -- "${SWAY_PID}" 2>/dev/null || true
+  fi
 
   if [[ -n "${SWAY_PID:-}" ]]; then
     wait "${SWAY_PID}" 2>/dev/null || true
@@ -90,13 +198,15 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+log INFO "Launching sway with config=${SWAY_CONFIG}"
 setsid sway -c "${SWAY_CONFIG}" &
 SWAY_PID=$!
 
 for _ in $(seq 1 100); do
   if ! kill -0 "${SWAY_PID}" 2>/dev/null; then
-    wait "${SWAY_PID}"
-    exit $?
+    wait "${SWAY_PID}" || SWAY_BOOT_STATUS=$?
+    log ERROR "sway exited before WAYLAND_DISPLAY was detected (status=${SWAY_BOOT_STATUS:-0})"
+    exit "${SWAY_BOOT_STATUS:-0}"
   fi
 
   mapfile -t CURRENT_WAYLAND_SOCKETS < <(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -type s -name 'wayland-*' -printf '%f\n' 2>/dev/null | sort)
@@ -111,18 +221,26 @@ for _ in $(seq 1 100); do
 done
 
 if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
-  echo "Failed to determine nested WAYLAND_DISPLAY for Sway session." >&2
+  log ERROR "Failed to determine nested WAYLAND_DISPLAY for Sway session."
   exit 1
 fi
 
+log INFO "Detected nested WAYLAND_DISPLAY=${WAYLAND_DISPLAY}"
+
 if [[ "${SWAY_ONLY}" != "1" ]]; then
-  start_in_own_group "${PANEL_CMD}"
-  start_in_own_group "${LAUNCHER_CMD}"
-  start_in_own_group "${NOTIFD_CMD}"
+  start_component "panel" "${PANEL_CMD}" 0
+  start_component "launcher" "${LAUNCHER_CMD}" 0
+  start_component "notifd" "${NOTIFD_CMD}" 0
+
+  monitor_components &
+  MONITOR_PID=$!
+  log INFO "Component monitor started (pid=${MONITOR_PID}, restart_mode=${DEV_RESTART_MODE})"
 fi
 
 wait "${SWAY_PID}"
 SWAY_STATUS=$?
+
+log INFO "sway exited with status=${SWAY_STATUS}"
 
 cleanup
 exit "${SWAY_STATUS}"
