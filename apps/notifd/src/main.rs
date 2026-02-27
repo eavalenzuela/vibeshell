@@ -142,14 +142,14 @@ impl NotificationsService {
     }
 
     #[zbus(signal)]
-    fn notification_closed(
+    async fn notification_closed(
         signal_ctxt: &zbus::SignalContext<'_>,
         id: u32,
         reason: u32,
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    fn action_invoked(
+    async fn action_invoked(
         signal_ctxt: &zbus::SignalContext<'_>,
         id: u32,
         action_key: &str,
@@ -428,9 +428,9 @@ fn spawn_dbus_service(
 
                 match event {
                     DbusEvent::NotificationClosed { id, reason } => {
-                        if let Err(error) =
-                            NotificationsService::notification_closed(&signal_ctxt, id, reason)
-                        {
+                        if let Err(error) = zbus::block_on(
+                            NotificationsService::notification_closed(&signal_ctxt, id, reason),
+                        ) {
                             tracing::warn!(
                                 ?error,
                                 notification_id = id,
@@ -439,9 +439,11 @@ fn spawn_dbus_service(
                         }
                     }
                     DbusEvent::ActionInvoked { id, action_key } => {
-                        if let Err(error) =
-                            NotificationsService::action_invoked(&signal_ctxt, id, &action_key)
-                        {
+                        if let Err(error) = zbus::block_on(NotificationsService::action_invoked(
+                            &signal_ctxt,
+                            id,
+                            &action_key,
+                        )) {
                             tracing::warn!(
                                 ?error,
                                 notification_id = id,
