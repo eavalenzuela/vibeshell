@@ -25,7 +25,7 @@ impl Urgency {
     fn from_hints(hints: &HashMap<String, OwnedValue>) -> Self {
         let level = hints
             .get("urgency")
-            .and_then(|value| u8::try_from(value.clone()).ok())
+            .and_then(|value| u8::try_from(value).ok())
             .unwrap_or(1);
 
         if level >= 2 {
