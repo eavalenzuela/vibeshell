@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead};
@@ -10,12 +9,14 @@ use common::contracts::{
     CanvasState, Cluster, ClusterId, ContextStripDirection, IpcRequest, IpcResponse, OutputState,
     Viewport, Window, WindowId, WindowRole, WindowState, ZoomLevel,
 };
-use common::model::{CanvasModel, OpenAssignPolicy};
 use serde::Serialize;
 use serde_json::json;
 use tracing::{info, warn};
 
 use swayipc::{Connection, EventType};
+
+mod state_store;
+use state_store::with_state_owner;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -83,16 +84,6 @@ enum Component {
     Panel,
     Launcher,
     Notifd,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ModelMutation {
-    SeedClusterFromWorkspace,
-    UpsertWindowFromTree,
-    SelectActiveCluster,
-    SyncZoom,
-    UpdateOutputViewport,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -216,19 +207,28 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error>> {
+    with_state_owner(|owner| owner.ingest_sway_facts())?;
+
     match request {
         IpcRequest::GetState => {
-            let state = build_canvas_state_from_sway()?;
+            let state = with_state_owner(|owner| {
+                owner.mutate_get_state();
+                owner.state()
+            });
             Ok(IpcResponse::State(state))
         }
         IpcRequest::SetZoom {
             level: ZoomLevel::Cluster(cluster_id),
-        } => match activate_cluster(cluster_id) {
-            Ok(()) => Ok(IpcResponse::Ack),
-            Err(error) => Ok(IpcResponse::Error {
-                message: error.to_string(),
-            }),
-        },
+        } => {
+            let result = with_state_owner(|owner| owner.activate_cluster(cluster_id));
+            match result {
+                Ok(()) => {
+                    activate_cluster(cluster_id)?;
+                    Ok(IpcResponse::Ack)
+                }
+                Err(message) => Ok(IpcResponse::Error { message }),
+            }
+        }
         IpcRequest::SetFocusZoomTarget { window } => {
             log_ipc_request(
                 IpcRequestType::SetFocusZoomTarget,
@@ -236,23 +236,55 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 None,
                 Some(window),
             );
-            match set_focus_zoom_target(window) {
-                Ok(()) => Ok(IpcResponse::Ack),
-                Err(error) => Ok(IpcResponse::Error { message: error }),
+            let result = with_state_owner(|owner| owner.set_focus_zoom_target(window));
+            match result {
+                Ok(()) => {
+                    if let Some(cluster_id) = with_state_owner(|owner| owner.selected_cluster_id())
+                    {
+                        activate_cluster(cluster_id)?;
+                    }
+                    focus_window(window)?;
+                    Ok(IpcResponse::Ack)
+                }
+                Err(message) => Ok(IpcResponse::Error { message }),
             }
         }
         IpcRequest::ZoomInMode => {
             log_ipc_request(IpcRequestType::ZoomInMode, "daemon-control", None, None);
-            match zoom_in_mode() {
-                Ok(()) => Ok(IpcResponse::Ack),
-                Err(error) => Ok(IpcResponse::Error { message: error }),
+            let (result, new_zoom) = with_state_owner(|owner| {
+                let result = owner.zoom_in_mode();
+                let new_zoom = owner.state().zoom;
+                (result, new_zoom)
+            });
+            match result {
+                Ok(()) => {
+                    match new_zoom {
+                        ZoomLevel::Cluster(cluster_id) => activate_cluster(cluster_id)?,
+                        ZoomLevel::Focus(window_id) => focus_window(window_id)?,
+                        ZoomLevel::Overview => {}
+                    }
+                    Ok(IpcResponse::Ack)
+                }
+                Err(message) => Ok(IpcResponse::Error { message }),
             }
         }
         IpcRequest::ZoomOutMode => {
             log_ipc_request(IpcRequestType::ZoomOutMode, "daemon-control", None, None);
-            match zoom_out_mode() {
-                Ok(()) => Ok(IpcResponse::Ack),
-                Err(error) => Ok(IpcResponse::Error { message: error }),
+            let (result, new_zoom) = with_state_owner(|owner| {
+                let result = owner.zoom_out_mode();
+                let new_zoom = owner.state().zoom;
+                (result, new_zoom)
+            });
+            match result {
+                Ok(()) => {
+                    match new_zoom {
+                        ZoomLevel::Cluster(cluster_id) => activate_cluster(cluster_id)?,
+                        ZoomLevel::Overview => send_overview_transition()?,
+                        ZoomLevel::Focus(window_id) => focus_window(window_id)?,
+                    }
+                    Ok(IpcResponse::Ack)
+                }
+                Err(message) => Ok(IpcResponse::Error { message }),
             }
         }
         IpcRequest::CycleStripForward => {
@@ -262,9 +294,12 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 None,
                 None,
             );
-            match cycle_context_strip(ContextStripDirection::Next) {
-                Ok(()) => Ok(IpcResponse::Ack),
-                Err(error) => Ok(IpcResponse::Error { message: error }),
+            match with_state_owner(|owner| owner.cycle_context_strip(ContextStripDirection::Next)) {
+                Ok(target) => {
+                    focus_window(target)?;
+                    Ok(IpcResponse::Ack)
+                }
+                Err(message) => Ok(IpcResponse::Error { message }),
             }
         }
         IpcRequest::CycleStripBackward => {
@@ -274,9 +309,14 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 None,
                 None,
             );
-            match cycle_context_strip(ContextStripDirection::Previous) {
-                Ok(()) => Ok(IpcResponse::Ack),
-                Err(error) => Ok(IpcResponse::Error { message: error }),
+            match with_state_owner(|owner| {
+                owner.cycle_context_strip(ContextStripDirection::Previous)
+            }) {
+                Ok(target) => {
+                    focus_window(target)?;
+                    Ok(IpcResponse::Ack)
+                }
+                Err(message) => Ok(IpcResponse::Error { message }),
             }
         }
         IpcRequest::CycleContextStrip { direction } => {
@@ -286,9 +326,12 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 None,
                 None,
             );
-            match cycle_context_strip(direction) {
-                Ok(()) => Ok(IpcResponse::Ack),
-                Err(error) => Ok(IpcResponse::Error { message: error }),
+            match with_state_owner(|owner| owner.cycle_context_strip(direction)) {
+                Ok(target) => {
+                    focus_window(target)?;
+                    Ok(IpcResponse::Ack)
+                }
+                Err(message) => Ok(IpcResponse::Error { message }),
             }
         }
         unsupported => Ok(IpcResponse::Error {
@@ -299,182 +342,6 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
             .to_string(),
         }),
     }
-}
-
-fn zoom_in_mode() -> Result<(), String> {
-    let state = build_canvas_state_from_sway().map_err(|error| error.to_string())?;
-    match state.zoom {
-        ZoomLevel::Overview => {
-            let cluster_id = state
-                .clusters
-                .first()
-                .map(|cluster| cluster.id)
-                .ok_or_else(|| {
-                    json!({"error":"invalid_state","reason":"no_clusters_available"}).to_string()
-                })?;
-            activate_cluster(cluster_id).map_err(|error| error.to_string())
-        }
-        ZoomLevel::Cluster(cluster_id) => {
-            let cluster = state
-                .clusters
-                .iter()
-                .find(|cluster| cluster.id == cluster_id)
-                .ok_or_else(|| {
-                    json!({"error":"invalid_state","reason":"active_cluster_missing"}).to_string()
-                })?;
-
-            let window_id = cluster
-                .last_focus
-                .or_else(|| cluster.windows.first().copied())
-                .ok_or_else(|| {
-                    json!({"error":"unsupported_state_combination","reason":"cluster_has_no_windows"})
-                        .to_string()
-                })?;
-
-            focus_window(window_id).map_err(|error| error.to_string())
-        }
-        ZoomLevel::Focus(_) => Err(
-            json!({"error":"unsupported_state_combination","reason":"already_in_focus_zoom"})
-                .to_string(),
-        ),
-    }
-}
-
-fn zoom_out_mode() -> Result<(), String> {
-    let state = build_canvas_state_from_sway().map_err(|error| error.to_string())?;
-    match state.zoom {
-        ZoomLevel::Focus(window_id) => {
-            let cluster_id = state
-                .clusters
-                .iter()
-                .find(|cluster| cluster.windows.contains(&window_id))
-                .map(|cluster| cluster.id)
-                .ok_or_else(|| {
-                    json!({"error":"invalid_state","reason":"focused_window_cluster_missing"})
-                        .to_string()
-                })?;
-            activate_cluster(cluster_id).map_err(|error| error.to_string())
-        }
-        ZoomLevel::Cluster(_) => {
-            let mut connection = Connection::new().map_err(|error| error.to_string())?;
-            for reply in connection
-                .run_command("workspace back_and_forth")
-                .map_err(|error| error.to_string())?
-            {
-                if let Err(error) = reply {
-                    return Err(format!("sway rejected overview transition command `workspace back_and_forth`: {error}"));
-                }
-            }
-            Ok(())
-        }
-        ZoomLevel::Overview => Err(
-            json!({"error":"unsupported_state_combination","reason":"already_in_overview_zoom"})
-                .to_string(),
-        ),
-    }
-}
-
-fn set_focus_zoom_target(window_id: WindowId) -> Result<(), String> {
-    let state = build_canvas_state_from_sway().map_err(|error| error.to_string())?;
-    let active_cluster = state
-        .clusters
-        .iter()
-        .find(|cluster| cluster.windows.contains(&window_id))
-        .map(|cluster| cluster.id)
-        .or_else(|| state.clusters.first().map(|cluster| cluster.id))
-        .ok_or_else(|| {
-            json!({"error":"invalid_state","reason":"no_clusters_available"}).to_string()
-        })?;
-
-    let mut model = CanvasModel::new(state.clone(), active_cluster).map_err(|error| {
-        json!({"error":"model_error","reason": format!("{error:?}")}).to_string()
-    })?;
-    model.on_focus_change(window_id).map_err(|error| {
-        json!({
-            "error":"invalid_focus_target",
-            "reason": format!("{error:?}"),
-            "window": window_id
-        })
-        .to_string()
-    })?;
-
-    let target_cluster = model
-        .state()
-        .windows
-        .iter()
-        .find(|window| window.id == window_id)
-        .and_then(|window| window.cluster_id)
-        .ok_or_else(|| {
-            json!({
-                "error":"invalid_state",
-                "reason":"window_missing_cluster",
-                "window": window_id
-            })
-            .to_string()
-        })?;
-
-    activate_cluster(target_cluster).map_err(|error| error.to_string())?;
-    focus_window(window_id).map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn cycle_context_strip(direction: ContextStripDirection) -> Result<(), String> {
-    let state = build_canvas_state_from_sway().map_err(|error| error.to_string())?;
-    let focused = match state.zoom {
-        ZoomLevel::Focus(window_id) => window_id,
-        _ => {
-            return Err(
-                json!({"error":"unsupported_state_combination","reason":"requires_focus_zoom"})
-                    .to_string(),
-            )
-        }
-    };
-
-    let cluster = state
-        .clusters
-        .iter()
-        .find(|cluster| cluster.windows.contains(&focused))
-        .ok_or_else(|| {
-            json!({
-                "error":"invalid_state",
-                "reason":"focused_window_cluster_missing",
-                "window": focused
-            })
-            .to_string()
-        })?;
-
-    if cluster.windows.len() < 2 {
-        return Err(
-            json!({"error":"unsupported_state_combination","reason":"context_strip_requires_multiple_windows"})
-                .to_string(),
-        );
-    }
-
-    let mut order = if cluster.recency.is_empty() {
-        cluster.windows.clone()
-    } else {
-        let mut merged = cluster.recency.clone();
-        for window_id in &cluster.windows {
-            if !merged.contains(window_id) {
-                merged.push(*window_id);
-            }
-        }
-        merged
-    };
-    order.retain(|window_id| *window_id != focused);
-    if order.is_empty() {
-        return Err(
-            json!({"error":"unsupported_state_combination","reason":"context_strip_empty"})
-                .to_string(),
-        );
-    }
-
-    let target = match direction {
-        ContextStripDirection::Next => order[0],
-        ContextStripDirection::Previous => *order.last().expect("order non-empty"),
-    };
-
-    focus_window(target).map_err(|error| error.to_string())
 }
 
 fn focus_window(window_id: WindowId) -> Result<(), Box<dyn std::error::Error>> {
@@ -509,6 +376,19 @@ fn activate_cluster(cluster_id: ClusterId) -> Result<(), Box<dyn std::error::Err
         }
     }
 
+    Ok(())
+}
+
+fn send_overview_transition() -> Result<(), Box<dyn std::error::Error>> {
+    let mut connection = Connection::new()?;
+    for reply in connection.run_command("workspace back_and_forth")? {
+        if let Err(error) = reply {
+            return Err(format!(
+                "sway rejected overview transition command `workspace back_and_forth`: {error}"
+            )
+            .into());
+        }
+    }
     Ok(())
 }
 
@@ -643,14 +523,13 @@ fn logs(component: Component) -> Result<(), Box<dyn std::error::Error>> {
 fn dump_state(pretty: bool) -> Result<(), Box<dyn std::error::Error>> {
     log_ipc_request(IpcRequestType::GetState, "daemon-snapshot", None, None);
     let events = ingest_sway_event_metadata()?;
-    let state = build_canvas_state_from_sway()?;
+    with_state_owner(|owner| owner.ingest_sway_facts())?;
+    let state = with_state_owner(|owner| {
+        owner.mutate_get_state();
+        owner.state()
+    });
 
-    let active_cluster = state
-        .windows
-        .iter()
-        .find(|window| matches!(state.zoom, ZoomLevel::Focus(id) if id == window.id))
-        .and_then(|window| window.cluster_id)
-        .or_else(|| state.clusters.first().map(|cluster| cluster.id));
+    let active_cluster = with_state_owner(|owner| owner.selected_cluster_id());
     let active_zoom = state.zoom.clone();
     let output = state.output.clone();
     let viewport = state.viewport.clone();
@@ -703,147 +582,6 @@ fn dump_state(pretty: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn build_canvas_state_from_sway() -> Result<CanvasState, Box<dyn std::error::Error>> {
-    let mut connection = Connection::new()?;
-    let tree = connection.get_tree()?;
-    let outputs = connection.get_outputs()?;
-    let workspaces = connection.get_workspaces()?;
-
-    let mut clusters: BTreeMap<ClusterId, Cluster> = BTreeMap::new();
-    for workspace in workspaces {
-        if workspace.num < 0 {
-            continue;
-        }
-
-        let cluster_id = workspace.id as ClusterId;
-        log_model_mutation(
-            ModelMutation::SeedClusterFromWorkspace,
-            Some(cluster_id),
-            None,
-            "workspace->cluster",
-        );
-        clusters.insert(
-            cluster_id,
-            Cluster {
-                id: cluster_id,
-                name: workspace.name,
-                x: workspace.rect.x as f64,
-                y: workspace.rect.y as f64,
-                enabled: workspace.visible,
-                windows: Vec::new(),
-                last_focus: None,
-                recency: Vec::new(),
-            },
-        );
-    }
-
-    let mut windows = Vec::new();
-    collect_windows_from_tree(&tree, None, &mut windows);
-    windows.sort_by_key(|window| window.id);
-
-    for window in &windows {
-        log_model_mutation(
-            ModelMutation::UpsertWindowFromTree,
-            window.cluster_id,
-            Some(window.id),
-            "tree-node",
-        );
-    }
-
-    let focused_window_id = windows
-        .iter()
-        .find(|window| {
-            matches!(window.state, WindowState::Fullscreen) || window.title.contains("[focused]")
-        })
-        .map(|window| window.id);
-
-    let fallback_cluster = clusters.keys().next().copied();
-    let mut model = CanvasModel::new(
-        CanvasState {
-            state_revision: 0,
-            zoom: ZoomLevel::Overview,
-            viewport: Viewport::default(),
-            clusters: clusters.values().cloned().collect(),
-            windows: Vec::new(),
-            output: OutputState::default(),
-        },
-        fallback_cluster.unwrap_or_default(),
-    )
-    .map_err(|error| format!("unable to initialize daemon model from sway snapshot: {error:?}"))?;
-
-    for mut window in windows {
-        let assigned_cluster = window.cluster_id.or(fallback_cluster);
-        if let Some(cluster_id) = assigned_cluster {
-            window.cluster_id = Some(cluster_id);
-            let _ = model.on_window_open(window, OpenAssignPolicy::FallbackCluster(cluster_id));
-        }
-    }
-
-    if let Some(window_id) = focused_window_id {
-        let _ = model.on_focus_change(window_id);
-    }
-
-    let active_cluster = Some(model.active_cluster());
-
-    log_model_mutation(
-        ModelMutation::SelectActiveCluster,
-        active_cluster,
-        focused_window_id,
-        "model-focus",
-    );
-
-    let active_zoom = if let Some(window_id) = focused_window_id {
-        ZoomLevel::Focus(window_id)
-    } else if let Some(cluster_id) = active_cluster {
-        ZoomLevel::Cluster(cluster_id)
-    } else {
-        ZoomLevel::Overview
-    };
-
-    log_model_mutation(
-        ModelMutation::SyncZoom,
-        active_cluster,
-        focused_window_id,
-        "derived",
-    );
-
-    let output = outputs
-        .into_iter()
-        .find(|output| output.focused)
-        .or_else(|| {
-            connection
-                .get_outputs()
-                .ok()
-                .and_then(|all| all.into_iter().next())
-        })
-        .map(|output| OutputState {
-            name: output.name,
-            width: output.rect.width,
-            height: output.rect.height,
-            scale: output.scale.unwrap_or(1.0),
-        })
-        .unwrap_or_default();
-
-    let viewport = Viewport {
-        x: 0.0,
-        y: 0.0,
-        scale: 1.0,
-    };
-
-    log_model_mutation(
-        ModelMutation::UpdateOutputViewport,
-        active_cluster,
-        focused_window_id,
-        "output+viewport",
-    );
-
-    let mut state = model.state().clone();
-    state.zoom = active_zoom;
-    state.viewport = viewport;
-    state.output = output;
-    Ok(state)
-}
-
 fn render_dump_state_json(dump: &DumpState, pretty: bool) -> Result<String, serde_json::Error> {
     if pretty {
         serde_json::to_string_pretty(dump)
@@ -893,101 +631,6 @@ fn ingest_sway_event_metadata() -> Result<SwayEventIngestSummary, Box<dyn std::e
     Ok(summary)
 }
 
-fn collect_windows_from_tree(
-    node: &swayipc::Node,
-    cluster: Option<ClusterId>,
-    out: &mut Vec<Window>,
-) {
-    let cluster_id = if matches!(node.node_type, swayipc::NodeType::Workspace) {
-        Some(node.id as ClusterId)
-    } else {
-        cluster
-    };
-
-    if matches!(
-        node.node_type,
-        swayipc::NodeType::Con | swayipc::NodeType::FloatingCon
-    ) && node.pid.is_some()
-    {
-        let title = node.name.clone().unwrap_or_default();
-        let focused_suffix = if node.focused { " [focused]" } else { "" };
-
-        let app_id = node.app_id.clone();
-        let class = node
-            .window_properties
-            .as_ref()
-            .and_then(|props| props.class.clone());
-        let transient_for = node
-            .window_properties
-            .as_ref()
-            .and_then(|props| props.transient_for)
-            .map(|id| id as WindowId);
-        let app_id_lower = app_id.as_deref().map(str::to_ascii_lowercase);
-        let class_lower = class.as_deref().map(str::to_ascii_lowercase);
-        let title_lower = title.to_ascii_lowercase();
-        let has_overlay_hint = ["overlay", "popup"]
-            .iter()
-            .any(|hint| title_lower.contains(hint))
-            || app_id_lower
-                .as_deref()
-                .is_some_and(|value| value.contains("overlay") || value.contains("popup"))
-            || class_lower
-                .as_deref()
-                .is_some_and(|value| value.contains("overlay") || value.contains("popup"));
-
-        let exclusion_reason = if node.fullscreen_mode.unwrap_or(0) > 0 {
-            Some("fullscreen_temporary_override")
-        } else if transient_for.is_some() {
-            Some("transient_dialog_attached_to_parent")
-        } else if has_overlay_hint {
-            Some("overlay_or_popup")
-        } else {
-            None
-        };
-
-        if let Some(reason) = exclusion_reason {
-            info!(
-                window_id = node.id,
-                reason, "window excluded from cluster reflow/slot geometry policy"
-            );
-        }
-
-        let role = if has_overlay_hint {
-            WindowRole::Utility
-        } else if node.floating.is_some() || transient_for.is_some() {
-            WindowRole::Dialog
-        } else {
-            WindowRole::Normal
-        };
-
-        out.push(Window {
-            id: node.id as WindowId,
-            title: format!("{}{}", title, focused_suffix),
-            app_id,
-            class,
-            role,
-            state: if node.fullscreen_mode.unwrap_or(0) > 0 {
-                WindowState::Fullscreen
-            } else if node.floating.is_some() {
-                WindowState::Floating
-            } else {
-                WindowState::Tiled
-            },
-            cluster_id,
-            transient_for,
-            manual_cluster_override: false,
-            manual_position_override: exclusion_reason.is_some(),
-        });
-    }
-
-    for child in &node.nodes {
-        collect_windows_from_tree(child, cluster_id, out);
-    }
-    for child in &node.floating_nodes {
-        collect_windows_from_tree(child, cluster_id, out);
-    }
-}
-
 fn log_sway_ingest(
     module: &str,
     event_type: &str,
@@ -997,22 +640,6 @@ fn log_sway_ingest(
     info!(
         module,
         event_type, cluster_id, window_id, "structured daemon ingest event"
-    );
-}
-
-fn log_model_mutation(
-    mutation: ModelMutation,
-    cluster_id: Option<ClusterId>,
-    window_id: Option<WindowId>,
-    source: &str,
-) {
-    info!(
-        module = "daemon_model",
-        event_type = ?mutation,
-        cluster_id,
-        window_id,
-        source,
-        "structured daemon model mutation"
     );
 }
 
