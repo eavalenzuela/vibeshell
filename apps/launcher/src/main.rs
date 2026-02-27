@@ -85,13 +85,12 @@ fn main() {
 
     spawn_sway_dependency_probe();
 
-    let (_, reload_rx) = common::spawn_reload_listener();
-
     let app = adw::Application::builder()
         .application_id("com.vibeshell.launcher")
         .build();
 
     app.connect_activate(move |app| {
+        let (_, reload_rx) = common::spawn_reload_listener();
         build_ui(app, apps.clone(), launcher_config.clone(), reload_rx)
     });
     app.run();
@@ -336,18 +335,21 @@ fn build_ui(
                         restart_required.push("window_height".to_owned());
                     }
 
+                    let applied_text = if applied.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        applied.join(", ")
+                    };
+                    let restart_required_text = if restart_required.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        restart_required.join(", ")
+                    };
+
                     tracing::info!(
                         trigger = reason.as_str(),
-                        applied = if applied.is_empty() {
-                            "none"
-                        } else {
-                            &applied.join(", ")
-                        },
-                        restart_required = if restart_required.is_empty() {
-                            "none"
-                        } else {
-                            &restart_required.join(", ")
-                        },
+                        applied = applied_text,
+                        restart_required = restart_required_text,
                         "launcher config reload processed"
                     );
                 }
