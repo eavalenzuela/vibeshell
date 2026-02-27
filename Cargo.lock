@@ -962,6 +962,8 @@ dependencies = [
  "gtk4",
  "gtk4-layer-shell",
  "libadwaita",
+ "serde",
+ "serde_json",
  "shell-words",
  "sway",
  "tracing",
