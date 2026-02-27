@@ -186,21 +186,17 @@ fn main() {
         })
         .notifications;
 
-    let (_, reload_rx) = common::spawn_reload_listener();
-
     let app = gtk::Application::builder()
         .application_id("com.vibeshell.notifd")
         .build();
 
-    app.connect_activate(move |app| build_ui(app, notifd_config.clone(), reload_rx));
+    app.connect_activate(move |app| build_ui(app, notifd_config.clone()));
     app.run();
 }
 
-fn build_ui(
-    app: &gtk::Application,
-    notifd_config: NotificationsConfig,
-    reload_rx: mpsc::Receiver<common::ReloadReason>,
-) {
+fn build_ui(app: &gtk::Application, notifd_config: NotificationsConfig) {
+    let (_, reload_rx) = common::spawn_reload_listener();
+
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("vibeshell-notifd")
@@ -301,18 +297,21 @@ fn build_ui(
                         restart_required.push("window not visible".to_owned());
                     }
 
+                    let applied_display = if applied.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        applied.join(", ")
+                    };
+                    let restart_required_display = if restart_required.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        restart_required.join(", ")
+                    };
+
                     tracing::info!(
                         trigger = reason.as_str(),
-                        applied = if applied.is_empty() {
-                            "none"
-                        } else {
-                            &applied.join(", ")
-                        },
-                        restart_required = if restart_required.is_empty() {
-                            "none"
-                        } else {
-                            &restart_required.join(", ")
-                        },
+                        applied = applied_display,
+                        restart_required = restart_required_display,
                         "notifd config reload processed"
                     );
                 }
