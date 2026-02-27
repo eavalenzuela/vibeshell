@@ -161,6 +161,45 @@ VIBESHELL_LOG=debug ./scripts/run-in-nested-sway 2>&1 | tee /tmp/vibeshell-neste
 
 - If you need to inspect after the run, open `/tmp/vibeshell-nested.log`.
 
+### `vibeshellctl` command-line control
+
+A new control binary is available for common shell lifecycle actions:
+
+```bash
+cargo run -p vibeshellctl -- <subcommand>
+```
+
+Subcommands:
+
+- `reload` — requests `sway reload` over Sway IPC.
+- `status` — reports whether `sway`, `panel`, `launcher`, and `notifd` are running.
+- `restart <component>` — stops and re-launches one component (`panel`, `launcher`, or `notifd`).
+- `logs <component>` — filters captured nested-session logs for one component.
+
+Examples for nested Sway development:
+
+```bash
+# Start nested Sway and capture logs for later inspection
+VIBESHELL_LOG=debug ./scripts/run-in-nested-sway 2>&1 | tee /tmp/vibeshell-nested.log
+
+# Check runtime state
+cargo run -p vibeshellctl -- status
+
+# Reload sway config in-place
+cargo run -p vibeshellctl -- reload
+
+# Restart just the panel while nested sway is running
+cargo run -p vibeshellctl -- restart panel
+
+# View launcher-only logs from the captured nested session file
+cargo run -p vibeshellctl -- logs launcher
+```
+
+Notes:
+
+- `logs` reads from `/tmp/vibeshell-nested.log` by default. Override with `VIBESHELL_LOG_FILE=/path/to/file`.
+- `restart` respects `VIBESHELL_PANEL_CMD`, `VIBESHELL_LAUNCHER_CMD`, and `VIBESHELL_NOTIFD_CMD` when set.
+
 ## Useful development commands
 
 ```bash
@@ -176,6 +215,7 @@ cargo clippy --workspace --all-targets
 - `apps/panel` – top panel UI
 - `apps/launcher` – app launcher UI
 - `apps/notifd` – notifications daemon/UI
+- `apps/vibeshellctl` – CLI for reload/status/restart/log inspection
 - `crates/sway` – sway IPC/event integration
 - `crates/xdg` – desktop entry discovery/parsing
 - `crates/config` – configuration crate

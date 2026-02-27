@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "apps/vibeshellctl",
   "apps/panel",
   "apps/launcher",
   "apps/notifd",

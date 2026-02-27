@@ -26,3 +26,6 @@ check:
     cargo check --workspace
 
 ci: fmt clippy check
+
+run-ctl *args:
+    cargo run -p vibeshellctl -- {{args}}
