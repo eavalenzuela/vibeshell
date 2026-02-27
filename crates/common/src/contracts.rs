@@ -53,9 +53,13 @@ pub struct Window {
     pub id: WindowId,
     pub title: String,
     pub app_id: Option<String>,
+    pub class: Option<String>,
     pub role: WindowRole,
     pub state: WindowState,
     pub cluster_id: Option<ClusterId>,
+    pub transient_for: Option<WindowId>,
+    pub manual_cluster_override: bool,
+    pub manual_position_override: bool,
 }
 
 impl Default for Window {
@@ -64,9 +68,13 @@ impl Default for Window {
             id: 0,
             title: String::new(),
             app_id: None,
+            class: None,
             role: WindowRole::default(),
             state: WindowState::default(),
             cluster_id: None,
+            transient_for: None,
+            manual_cluster_override: false,
+            manual_position_override: false,
         }
     }
 }
@@ -196,9 +204,13 @@ mod tests {
                 id: 100,
                 title: "Terminal".into(),
                 app_id: Some("foot".into()),
+                class: Some("foot".into()),
                 role: WindowRole::Normal,
                 state: WindowState::Tiled,
                 cluster_id: Some(7),
+                transient_for: None,
+                manual_cluster_override: true,
+                manual_position_override: false,
             }],
             output: OutputState::default(),
         };
