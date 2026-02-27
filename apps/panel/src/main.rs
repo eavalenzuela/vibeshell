@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -14,6 +15,29 @@ use gtk::glib;
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use status::{PanelStatus, StatusCollector};
+
+#[derive(Clone)]
+struct RuntimePanelConfig {
+    clock_format: String,
+    status_poll_interval_ms: u64,
+    audio_toggle_command: String,
+    audio_mixer_command: Option<String>,
+    network_settings_command: String,
+    power_menu_command: String,
+}
+
+impl From<&PanelConfig> for RuntimePanelConfig {
+    fn from(value: &PanelConfig) -> Self {
+        Self {
+            clock_format: value.clock_format.clone(),
+            status_poll_interval_ms: value.status_poll_interval_ms,
+            audio_toggle_command: value.audio_toggle_command.clone(),
+            audio_mixer_command: value.audio_mixer_command.clone(),
+            network_settings_command: value.network_settings_command.clone(),
+            power_menu_command: value.power_menu_command.clone(),
+        }
+    }
+}
 use sway::{PanelState, PanelUpdate, WorkspaceState};
 
 const RENDER_DEBOUNCE: Duration = Duration::from_millis(50);
@@ -29,15 +53,21 @@ fn main() {
         PanelConfig::default()
     });
 
+    let (_, reload_rx) = common::spawn_reload_listener();
+
     let app = adw::Application::builder()
         .application_id("com.vibeshell.panel")
         .build();
 
-    app.connect_activate(move |app| build_ui(app, panel_config.clone()));
+    app.connect_activate(move |app| build_ui(app, panel_config.clone(), reload_rx));
     app.run();
 }
 
-fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
+fn build_ui(
+    app: &adw::Application,
+    panel_config: PanelConfig,
+    reload_rx: mpsc::Receiver<common::ReloadReason>,
+) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("vibeshell-panel")
@@ -45,6 +75,8 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
         .build();
 
     window.set_size_request(-1, panel_config.height);
+
+    let runtime_config = Arc::new(Mutex::new(RuntimePanelConfig::from(&panel_config)));
 
     if layer_shell::is_supported() {
         window.set_decorated(false);
@@ -70,7 +102,14 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
     title.set_halign(gtk::Align::Center);
 
     let clock = gtk::Label::new(Some(
-        &Local::now().format(&panel_config.clock_format).to_string(),
+        &Local::now()
+            .format(
+                &runtime_config
+                    .lock()
+                    .expect("runtime config poisoned")
+                    .clock_format,
+            )
+            .to_string(),
     ));
     clock.set_halign(gtk::Align::End);
 
@@ -120,13 +159,16 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
 
     let audio_click = gtk::GestureClick::new();
     {
-        let mixer_command = panel_config.audio_mixer_command.clone();
-        let toggle_command = panel_config.audio_toggle_command.clone();
+        let runtime_config = Arc::clone(&runtime_config);
         audio_click.connect_pressed(move |_, _, _, _| {
-            if let Some(command) = mixer_command.as_deref() {
+            let config = runtime_config
+                .lock()
+                .expect("runtime config poisoned")
+                .clone();
+            if let Some(command) = config.audio_mixer_command.as_deref() {
                 run_configured_command(command, "audio mixer");
             } else {
-                run_configured_command(&toggle_command, "audio toggle");
+                run_configured_command(&config.audio_toggle_command, "audio toggle");
             }
         });
     }
@@ -134,27 +176,39 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
 
     let network_click = gtk::GestureClick::new();
     {
-        let network_command = panel_config.network_settings_command.clone();
+        let runtime_config = Arc::clone(&runtime_config);
         network_click.connect_pressed(move |_, _, _, _| {
-            run_configured_command(&network_command, "network settings");
+            let config = runtime_config
+                .lock()
+                .expect("runtime config poisoned")
+                .clone();
+            run_configured_command(&config.network_settings_command, "network settings");
         });
     }
     network.add_controller(network_click);
 
     let power_click = gtk::GestureClick::new();
     {
-        let power_command = panel_config.power_menu_command.clone();
+        let runtime_config = Arc::clone(&runtime_config);
         power_click.connect_pressed(move |_, _, _, _| {
-            run_configured_command(&power_command, "power menu");
+            let config = runtime_config
+                .lock()
+                .expect("runtime config poisoned")
+                .clone();
+            run_configured_command(&config.power_menu_command, "power menu");
         });
     }
     power.add_controller(power_click);
 
     window.present();
 
-    let clock_format = panel_config.clock_format.clone();
+    let runtime_clock_config = Arc::clone(&runtime_config);
     glib::timeout_add_seconds_local(1, move || {
-        clock.set_text(&Local::now().format(&clock_format).to_string());
+        let config = runtime_clock_config
+            .lock()
+            .expect("runtime config poisoned")
+            .clone();
+        clock.set_text(&Local::now().format(&config.clock_format).to_string());
         glib::ControlFlow::Continue
     });
 
@@ -194,28 +248,35 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
         }
     });
 
-    let status_poll_interval = Duration::from_millis(panel_config.status_poll_interval_ms.max(100));
-    thread::spawn(move || {
-        let collector = StatusCollector::new();
-        let mut last_status = PanelStatus::default();
+    thread::spawn({
+        let runtime_config = Arc::clone(&runtime_config);
+        move || {
+            let collector = StatusCollector::new();
+            let mut last_status = PanelStatus::default();
 
-        if status_sender.send(last_status.clone()).is_err() {
-            return;
-        }
-
-        loop {
-            let next_status = collector.collect();
-            if next_status.audio != last_status.audio
-                || next_status.network != last_status.network
-                || next_status.battery != last_status.battery
-            {
-                if status_sender.send(next_status.clone()).is_err() {
-                    break;
-                }
-                last_status = next_status;
+            if status_sender.send(last_status.clone()).is_err() {
+                return;
             }
 
-            thread::sleep(status_poll_interval);
+            loop {
+                let next_status = collector.collect();
+                if next_status.audio != last_status.audio
+                    || next_status.network != last_status.network
+                    || next_status.battery != last_status.battery
+                {
+                    if status_sender.send(next_status.clone()).is_err() {
+                        break;
+                    }
+                    last_status = next_status;
+                }
+
+                let poll_interval_ms = runtime_config
+                    .lock()
+                    .expect("runtime config poisoned")
+                    .status_poll_interval_ms
+                    .max(100);
+                thread::sleep(Duration::from_millis(poll_interval_ms));
+            }
         }
     });
 
@@ -269,6 +330,82 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
             audio.set_text(&status.audio);
             network.set_text(&status.network);
             battery.set_text(&status.battery);
+        }
+
+        glib::ControlFlow::Continue
+    });
+
+    glib::timeout_add_local(Duration::from_millis(200), move || {
+        while let Ok(reason) = reload_rx.try_recv() {
+            match Config::load() {
+                Ok(config) => {
+                    let old = runtime_config
+                        .lock()
+                        .expect("runtime config poisoned")
+                        .clone();
+                    let next = RuntimePanelConfig::from(&config.panel);
+
+                    let mut applied = Vec::new();
+                    let mut restart_required = Vec::new();
+
+                    if old.clock_format != next.clock_format {
+                        applied.push(format!(
+                            "clock_format: {} -> {}",
+                            old.clock_format, next.clock_format
+                        ));
+                    }
+                    if old.status_poll_interval_ms != next.status_poll_interval_ms {
+                        applied.push(format!(
+                            "status_poll_interval_ms: {} -> {}",
+                            old.status_poll_interval_ms, next.status_poll_interval_ms
+                        ));
+                    }
+                    if old.audio_toggle_command != next.audio_toggle_command {
+                        applied.push("audio_toggle_command updated".to_owned());
+                    }
+                    if old.audio_mixer_command != next.audio_mixer_command {
+                        applied.push("audio_mixer_command updated".to_owned());
+                    }
+                    if old.network_settings_command != next.network_settings_command {
+                        applied.push("network_settings_command updated".to_owned());
+                    }
+                    if old.power_menu_command != next.power_menu_command {
+                        applied.push("power_menu_command updated".to_owned());
+                    }
+
+                    if panel_config.height != config.panel.height {
+                        restart_required.push("height".to_owned());
+                    }
+                    if panel_config.margin_start != config.panel.margin_start {
+                        restart_required.push("margin_start".to_owned());
+                    }
+                    if panel_config.margin_end != config.panel.margin_end {
+                        restart_required.push("margin_end".to_owned());
+                    }
+
+                    *runtime_config.lock().expect("runtime config poisoned") = next;
+
+                    tracing::info!(
+                        trigger = reason.as_str(),
+                        applied = if applied.is_empty() {
+                            "none"
+                        } else {
+                            &applied.join(", ")
+                        },
+                        restart_required = if restart_required.is_empty() {
+                            "none"
+                        } else {
+                            &restart_required.join(", ")
+                        },
+                        "panel config reload processed"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    ?error,
+                    trigger = reason.as_str(),
+                    "panel reload ignored due to config load error"
+                ),
+            }
         }
 
         glib::ControlFlow::Continue

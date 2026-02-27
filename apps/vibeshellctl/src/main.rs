@@ -4,6 +4,8 @@ use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use tracing::info;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use swayipc::Connection;
 
@@ -90,7 +92,24 @@ fn reload() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("sway reload requested");
+    for component in [Component::Panel, Component::Launcher, Component::Notifd] {
+        send_reload_signal(component.process_name())?;
+    }
+
+    println!("reload requested (sway + vibeshell components)");
+    Ok(())
+}
+
+fn send_reload_signal(process_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("pkill")
+        .args(["-HUP", "-x", process_name])
+        .status()?;
+
+    if !status.success() {
+        return Err(format!("failed to send SIGHUP to {process_name}").into());
+    }
+
+    info!(process_name, "requested config reload");
     Ok(())
 }
 

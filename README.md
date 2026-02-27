@@ -171,7 +171,7 @@ cargo run -p vibeshellctl -- <subcommand>
 
 Subcommands:
 
-- `reload` — requests `sway reload` over Sway IPC.
+- `reload` — requests `sway reload` and sends `SIGHUP` to `panel`, `launcher`, and `notifd` so they re-read `crates/config` values at runtime when safe.
 - `status` — reports whether `sway`, `panel`, `launcher`, and `notifd` are running.
 - `restart <component>` — stops and re-launches one component (`panel`, `launcher`, or `notifd`).
 - `logs <component>` — filters captured nested-session logs for one component.
@@ -187,6 +187,11 @@ cargo run -p vibeshellctl -- status
 
 # Reload sway config in-place
 cargo run -p vibeshellctl -- reload
+
+# Equivalent manual signal-based reload
+pkill -HUP -x panel
+pkill -HUP -x launcher
+pkill -HUP -x notifd
 
 # Restart just the panel while nested sway is running
 cargo run -p vibeshellctl -- restart panel

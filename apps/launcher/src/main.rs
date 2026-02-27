@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,6 +61,12 @@ struct ScoredEntry {
     entry: DesktopEntry,
 }
 
+#[derive(Clone)]
+struct RuntimeLauncherConfig {
+    max_results: usize,
+    terminal_command: String,
+}
+
 fn main() {
     common::init_logging("launcher");
     tracing::info!(app = "launcher", "starting up");
@@ -78,15 +85,24 @@ fn main() {
 
     spawn_sway_dependency_probe();
 
+    let (_, reload_rx) = common::spawn_reload_listener();
+
     let app = adw::Application::builder()
         .application_id("com.vibeshell.launcher")
         .build();
 
-    app.connect_activate(move |app| build_ui(app, apps.clone(), launcher_config.clone()));
+    app.connect_activate(move |app| {
+        build_ui(app, apps.clone(), launcher_config.clone(), reload_rx)
+    });
     app.run();
 }
 
-fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: LauncherConfig) {
+fn build_ui(
+    app: &adw::Application,
+    apps: Vec<DesktopEntry>,
+    launcher_config: LauncherConfig,
+    reload_rx: std::sync::mpsc::Receiver<common::ReloadReason>,
+) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("vibeshell-launcher")
@@ -95,6 +111,11 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
         .build();
 
     window.set_resizable(false);
+
+    let runtime_config = Arc::new(Mutex::new(RuntimeLauncherConfig {
+        max_results: launcher_config.max_results,
+        terminal_command: launcher_config.terminal_command.clone(),
+    }));
 
     if layer_shell::is_supported() {
         window.set_decorated(false);
@@ -145,9 +166,13 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
         let list = list.clone();
         let state = state.clone();
         let usage_stats = usage_stats.clone();
-        let max_results = launcher_config.max_results;
+        let runtime_config = Arc::clone(&runtime_config);
         input.connect_changed(move |entry| {
             let query = entry.text().to_string();
+            let max_results = runtime_config
+                .lock()
+                .expect("runtime config poisoned")
+                .max_results;
             let ranked = rank_entries(&apps, &query, max_results, &usage_stats.borrow());
             populate_results(&list, &state, &ranked);
         });
@@ -160,13 +185,16 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
         let state = state.clone();
         let usage_stats = usage_stats.clone();
         let usage_path = usage_path.clone();
-        let terminal_command = launcher_config.terminal_command.clone();
+        let runtime_config = Arc::clone(&runtime_config);
         input.connect_activate(move |_| {
             let index = selected_index(&list).unwrap_or(0);
             if launch_selected(
                 &state.borrow(),
                 index,
-                &terminal_command,
+                &runtime_config
+                    .lock()
+                    .expect("runtime config poisoned")
+                    .terminal_command,
                 LaunchMode::Default,
                 &usage_stats,
                 &usage_path,
@@ -185,7 +213,7 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
         let state = state.clone();
         let usage_stats = usage_stats.clone();
         let usage_path = usage_path.clone();
-        let terminal_command = launcher_config.terminal_command.clone();
+        let runtime_config = Arc::clone(&runtime_config);
         let key_controller = gtk::EventControllerKey::new();
         let controlled_window = window.clone();
         key_controller.connect_key_pressed(move |_, key, _, modifiers| match key {
@@ -213,7 +241,10 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
                 if launch_selected(
                     &state.borrow(),
                     index,
-                    &terminal_command,
+                    &runtime_config
+                        .lock()
+                        .expect("runtime config poisoned")
+                        .terminal_command,
                     mode,
                     &usage_stats,
                     &usage_path,
@@ -235,13 +266,16 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
         let state = state.clone();
         let usage_stats = usage_stats.clone();
         let usage_path = usage_path.clone();
-        let terminal_command = launcher_config.terminal_command.clone();
+        let runtime_config = Arc::clone(&runtime_config);
         list.connect_row_activated(move |_, row| {
             let index = row.index() as usize;
             if launch_selected(
                 &state.borrow(),
                 index,
-                &terminal_command,
+                &runtime_config
+                    .lock()
+                    .expect("runtime config poisoned")
+                    .terminal_command,
                 LaunchMode::Default,
                 &usage_stats,
                 &usage_path,
@@ -259,13 +293,74 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
         &rank_entries(
             &apps,
             "",
-            launcher_config.max_results,
+            runtime_config
+                .lock()
+                .expect("runtime config poisoned")
+                .max_results,
             &usage_stats.borrow(),
         ),
     );
 
     window.present();
     input.grab_focus();
+
+    glib::timeout_add_local(Duration::from_millis(200), move || {
+        while let Ok(reason) = reload_rx.try_recv() {
+            match Config::load() {
+                Ok(config) => {
+                    let new_cfg = config.launcher;
+                    let mut applied = Vec::new();
+                    let mut restart_required = Vec::new();
+
+                    let mut rt = runtime_config.lock().expect("runtime config poisoned");
+                    if rt.max_results != new_cfg.max_results {
+                        applied.push(format!(
+                            "max_results: {} -> {}",
+                            rt.max_results, new_cfg.max_results
+                        ));
+                        rt.max_results = new_cfg.max_results;
+                    }
+                    if rt.terminal_command != new_cfg.terminal_command {
+                        applied.push("terminal_command updated".to_owned());
+                        rt.terminal_command = new_cfg.terminal_command.clone();
+                    }
+
+                    if launcher_config.window_width != new_cfg.window_width {
+                        applied.push(format!(
+                            "window_width: {} -> {}",
+                            launcher_config.window_width, new_cfg.window_width
+                        ));
+                        window.set_default_width(new_cfg.window_width);
+                    }
+                    if launcher_config.window_height != new_cfg.window_height {
+                        restart_required.push("window_height".to_owned());
+                    }
+
+                    tracing::info!(
+                        trigger = reason.as_str(),
+                        applied = if applied.is_empty() {
+                            "none"
+                        } else {
+                            &applied.join(", ")
+                        },
+                        restart_required = if restart_required.is_empty() {
+                            "none"
+                        } else {
+                            &restart_required.join(", ")
+                        },
+                        "launcher config reload processed"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    ?error,
+                    trigger = reason.as_str(),
+                    "launcher reload ignored due to config load error"
+                ),
+            }
+        }
+
+        glib::ControlFlow::Continue
+    });
 }
 
 fn rank_entries(
