@@ -94,16 +94,23 @@ fn build_ui(app: &adw::Application, apps: Vec<DesktopEntry>, launcher_config: La
         .default_height(launcher_config.window_height)
         .build();
 
-    window.set_decorated(false);
     window.set_resizable(false);
 
-    window.init_layer_shell();
-    window.set_layer(layer_shell::Layer::Overlay);
-    window.set_keyboard_mode(layer_shell::KeyboardMode::Exclusive);
-    window.set_anchor(layer_shell::Edge::Top, true);
-    window.set_anchor(layer_shell::Edge::Bottom, true);
-    window.set_anchor(layer_shell::Edge::Left, true);
-    window.set_anchor(layer_shell::Edge::Right, true);
+    if layer_shell::is_supported() {
+        window.set_decorated(false);
+        window.init_layer_shell();
+        window.set_layer(layer_shell::Layer::Overlay);
+        window.set_keyboard_mode(layer_shell::KeyboardMode::Exclusive);
+        window.set_anchor(layer_shell::Edge::Top, true);
+        window.set_anchor(layer_shell::Edge::Bottom, true);
+        window.set_anchor(layer_shell::Edge::Left, true);
+        window.set_anchor(layer_shell::Edge::Right, true);
+    } else {
+        tracing::warn!("layer shell protocol unavailable; falling back to a regular GTK window");
+        eprintln!(
+            "launcher: compositor does not support zwlr_layer_shell_v1; using regular window mode."
+        );
+    }
 
     let panel = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -470,7 +477,9 @@ fn save_usage_stats(path: &Path, usage: &UsageStats) -> Result<(), String> {
 }
 
 fn close_launcher(window: &adw::ApplicationWindow, app: &adw::Application) {
-    window.set_keyboard_mode(layer_shell::KeyboardMode::OnDemand);
+    if layer_shell::is_supported() {
+        window.set_keyboard_mode(layer_shell::KeyboardMode::OnDemand);
+    }
     window.close();
     app.quit();
 }
