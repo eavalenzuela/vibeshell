@@ -7,11 +7,12 @@ use std::process::{Command, Stdio};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use common::contracts::{
-    CanvasState, Cluster, ClusterId, IpcRequest, IpcResponse, OutputState, Viewport, Window,
-    WindowId, WindowRole, WindowState, ZoomLevel,
+    CanvasState, Cluster, ClusterId, ContextStripDirection, IpcRequest, IpcResponse, OutputState,
+    Viewport, Window, WindowId, WindowRole, WindowState, ZoomLevel,
 };
 use common::model::{CanvasModel, OpenAssignPolicy};
 use serde::Serialize;
+use serde_json::json;
 use tracing::{info, warn};
 
 use swayipc::{Connection, EventType};
@@ -61,6 +62,12 @@ enum IpcCommands {
     },
     /// Activate/select a cluster via SetZoom IPC.
     ActivateCluster { cluster: ClusterId },
+    /// Set the focus zoom target to a concrete window id.
+    SetFocusZoomTarget { window: WindowId },
+    /// Cycle to the next window in the context strip while in focus zoom.
+    CycleContextStripNext,
+    /// Cycle to the previous window in the context strip while in focus zoom.
+    CycleContextStripPrevious,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -84,6 +91,8 @@ enum ModelMutation {
 #[serde(rename_all = "snake_case")]
 enum IpcRequestType {
     GetState,
+    SetFocusZoomTarget,
+    CycleContextStrip,
 }
 
 #[derive(Debug, Serialize)]
@@ -166,6 +175,21 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
             },
             false,
         ),
+        IpcCommands::SetFocusZoomTarget { window } => {
+            (IpcRequest::SetFocusZoomTarget { window }, false)
+        }
+        IpcCommands::CycleContextStripNext => (
+            IpcRequest::CycleContextStrip {
+                direction: ContextStripDirection::Next,
+            },
+            false,
+        ),
+        IpcCommands::CycleContextStripPrevious => (
+            IpcRequest::CycleContextStrip {
+                direction: ContextStripDirection::Previous,
+            },
+            false,
+        ),
     };
 
     let response = dispatch_ipc_request(request)?;
@@ -191,10 +215,152 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 message: error.to_string(),
             }),
         },
+        IpcRequest::SetFocusZoomTarget { window } => {
+            log_ipc_request(
+                IpcRequestType::SetFocusZoomTarget,
+                "daemon-control",
+                None,
+                Some(window),
+            );
+            match set_focus_zoom_target(window) {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(error) => Ok(IpcResponse::Error { message: error }),
+            }
+        }
+        IpcRequest::CycleContextStrip { direction } => {
+            log_ipc_request(
+                IpcRequestType::CycleContextStrip,
+                "daemon-control",
+                None,
+                None,
+            );
+            match cycle_context_strip(direction) {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(error) => Ok(IpcResponse::Error { message: error }),
+            }
+        }
         unsupported => Ok(IpcResponse::Error {
-            message: format!("unsupported ipc request: {unsupported:?}"),
+            message: json!({
+                "error": "unsupported_ipc_request",
+                "request": format!("{unsupported:?}"),
+            })
+            .to_string(),
         }),
     }
+}
+
+fn set_focus_zoom_target(window_id: WindowId) -> Result<(), String> {
+    let state = build_canvas_state_from_sway().map_err(|error| error.to_string())?;
+    let active_cluster = state
+        .clusters
+        .iter()
+        .find(|cluster| cluster.windows.contains(&window_id))
+        .map(|cluster| cluster.id)
+        .or_else(|| state.clusters.first().map(|cluster| cluster.id))
+        .ok_or_else(|| {
+            json!({"error":"invalid_state","reason":"no_clusters_available"}).to_string()
+        })?;
+
+    let mut model = CanvasModel::new(state.clone(), active_cluster).map_err(|error| {
+        json!({"error":"model_error","reason": format!("{error:?}")}).to_string()
+    })?;
+    model.on_focus_change(window_id).map_err(|error| {
+        json!({
+            "error":"invalid_focus_target",
+            "reason": format!("{error:?}"),
+            "window": window_id
+        })
+        .to_string()
+    })?;
+
+    let target_cluster = model
+        .state()
+        .windows
+        .iter()
+        .find(|window| window.id == window_id)
+        .and_then(|window| window.cluster_id)
+        .ok_or_else(|| {
+            json!({
+                "error":"invalid_state",
+                "reason":"window_missing_cluster",
+                "window": window_id
+            })
+            .to_string()
+        })?;
+
+    activate_cluster(target_cluster).map_err(|error| error.to_string())?;
+    focus_window(window_id).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn cycle_context_strip(direction: ContextStripDirection) -> Result<(), String> {
+    let state = build_canvas_state_from_sway().map_err(|error| error.to_string())?;
+    let focused = match state.zoom {
+        ZoomLevel::Focus(window_id) => window_id,
+        _ => {
+            return Err(
+                json!({"error":"unsupported_state_combination","reason":"requires_focus_zoom"})
+                    .to_string(),
+            )
+        }
+    };
+
+    let cluster = state
+        .clusters
+        .iter()
+        .find(|cluster| cluster.windows.contains(&focused))
+        .ok_or_else(|| {
+            json!({
+                "error":"invalid_state",
+                "reason":"focused_window_cluster_missing",
+                "window": focused
+            })
+            .to_string()
+        })?;
+
+    if cluster.windows.len() < 2 {
+        return Err(
+            json!({"error":"unsupported_state_combination","reason":"context_strip_requires_multiple_windows"})
+                .to_string(),
+        );
+    }
+
+    let mut order = if cluster.recency.is_empty() {
+        cluster.windows.clone()
+    } else {
+        let mut merged = cluster.recency.clone();
+        for window_id in &cluster.windows {
+            if !merged.contains(window_id) {
+                merged.push(*window_id);
+            }
+        }
+        merged
+    };
+    order.retain(|window_id| *window_id != focused);
+    if order.is_empty() {
+        return Err(
+            json!({"error":"unsupported_state_combination","reason":"context_strip_empty"})
+                .to_string(),
+        );
+    }
+
+    let target = match direction {
+        ContextStripDirection::Next => order[0],
+        ContextStripDirection::Previous => *order.last().expect("order non-empty"),
+    };
+
+    focus_window(target).map_err(|error| error.to_string())
+}
+
+fn focus_window(window_id: WindowId) -> Result<(), Box<dyn std::error::Error>> {
+    let mut connection = Connection::new()?;
+    let command = format!("[con_id={window_id}] focus");
+    for reply in connection.run_command(&command)? {
+        if let Err(error) = reply {
+            return Err(format!("sway rejected focus command `{command}`: {error}").into());
+        }
+    }
+    Ok(())
 }
 
 fn activate_cluster(cluster_id: ClusterId) -> Result<(), Box<dyn std::error::Error>> {

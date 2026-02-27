@@ -157,6 +157,12 @@ pub enum IpcRequest {
     SetZoom {
         level: ZoomLevel,
     },
+    SetFocusZoomTarget {
+        window: WindowId,
+    },
+    CycleContextStrip {
+        direction: ContextStripDirection,
+    },
     Pan {
         dx: f64,
         dy: f64,
@@ -176,6 +182,13 @@ pub enum IpcRequest {
     },
     GetState,
     ReloadConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextStripDirection {
+    Next,
+    Previous,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -234,6 +247,26 @@ mod tests {
         let fixture = IpcRequest::MoveWindowToCluster {
             window: 100,
             cluster: 7,
+        };
+
+        let json = serde_json::to_string(&fixture).expect("serialize request");
+        let parsed: IpcRequest = serde_json::from_str(&json).expect("parse request");
+        assert_eq!(parsed, fixture);
+    }
+
+    #[test]
+    fn round_trip_ipc_set_focus_zoom_target() {
+        let fixture = IpcRequest::SetFocusZoomTarget { window: 100 };
+
+        let json = serde_json::to_string(&fixture).expect("serialize request");
+        let parsed: IpcRequest = serde_json::from_str(&json).expect("parse request");
+        assert_eq!(parsed, fixture);
+    }
+
+    #[test]
+    fn round_trip_ipc_cycle_context_strip() {
+        let fixture = IpcRequest::CycleContextStrip {
+            direction: ContextStripDirection::Previous,
         };
 
         let json = serde_json::to_string(&fixture).expect("serialize request");
