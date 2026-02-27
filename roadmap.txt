@@ -537,7 +537,39 @@ Never place cluster card commit position outside global canvas min/max bounds; i
 
 On output hotplug/remove during Overview, remap viewport to primary output and preserve relative cluster coordinates.
 
-Exit criteria: you can navigate primarily from overview without remembering numbers.
+Phase 4 exit criteria (concrete checks)
+
+1. Cluster creation + spatial persistence
+   - User can create a new cluster from Overview, position it on the canvas, and drag/reposition any existing cluster.
+   - Final cluster positions are persisted on commit and restored after daemon/app restart with no manual recovery steps.
+
+2. Discoverable dive path with bounded interaction count
+   - From Overview, user can select any currently visible cluster and enter Cluster/Focus mode in at most 2 interactions:
+     - Path A: single click select + Enter.
+     - Path B: double click to dive.
+   - If selection is missing, UI must expose a hint and keep state unchanged (no accidental mode switch).
+
+3. Pan/zoom selection stability
+   - During overview pan/zoom, currently selected cluster remains selected until explicit selection change or mode exit.
+   - If selected cluster moves partially or fully off-screen, viewport logic must provide recenter/discoverability behavior (per spec) without dropping selection state.
+
+4. Keyboard-only parity
+   - A keyboard-only path exists for selecting, moving, and activating a cluster:
+     - Select: focus traversal/selection keys in Overview.
+     - Move: enter move mode (`M`), adjust with Arrow/Shift+Arrow, commit with Enter, cancel with Esc.
+     - Activate/dive: Enter from selected cluster.
+
+5. Phase 2/3 regression guardrails
+   - Repeated enter/exit cycles between Overview <-> Cluster <-> Focus do not regress deterministic layout behavior from Phase 2/3.
+   - Specifically, no new window shuffle/flicker, and previously stable cluster/focus layout outcomes remain stable across at least 20 consecutive transitions.
+
+Manual verification checklist (mapped to criteria)
+
+- [ ] C1: Create two test clusters in Overview, drag both to distinct positions, restart daemon/session, verify positions match pre-restart placements.
+- [ ] C2: For every visible cluster in current viewport, verify dive in <=2 interactions via (click+Enter) and (double click).
+- [ ] C3: Select a cluster, perform aggressive pan/zoom in/out and across output edges, verify selection is preserved and cluster can be rediscovered/recentered without reselecting.
+- [ ] C4: Unplug pointer input (or do not use mouse), select cluster via keyboard, move it with `M` + arrows, commit/cancel flows, and dive with Enter.
+- [ ] C5: Run 20 Overview <-> Cluster <-> Focus cycles across at least 3 clusters with mixed window counts (1, 2, 3+), confirm no Phase 2/3 layout regressions.
 
 Phase 5 — Persistence + robustness (make it daily-drivable)
 
