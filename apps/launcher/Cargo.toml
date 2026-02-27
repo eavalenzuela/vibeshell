@@ -11,7 +11,7 @@ sway = { path = "../../crates/sway" }
 xdg = { path = "../../crates/xdg" }
 tracing.workspace = true
 gtk4 = "0.8"
-libadwaita = "0.6"
+adw = { package = "libadwaita", version = "0.6" }
 gtk4-layer-shell = "0.3"
 shell-words = "1.1"
 
