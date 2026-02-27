@@ -1,3 +1,5 @@
+pub mod backend;
+
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
@@ -120,7 +122,18 @@ pub fn spawn_event_stream() -> Receiver<SwaySignal> {
         };
 
         for event in &mut events {
-            if event.is_err() || event_tx.send(SwaySignal::WorkspaceOrWindow).is_err() {
+            if let Err(error) = event {
+                tracing::warn!(?error, "sway event stream ended with error");
+                break;
+            }
+
+            tracing::debug!(
+                stage = "queued_events",
+                queued_events = 1,
+                "received sway event signal"
+            );
+
+            if event_tx.send(SwaySignal::WorkspaceOrWindow).is_err() {
                 break;
             }
         }
