@@ -9,6 +9,7 @@ use common::contracts::{CanvasState, ClusterId, IpcResponse};
 use gtk::glib;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 
+mod interaction;
 mod interaction_state;
 mod ui;
 
@@ -63,10 +64,15 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
+    let mutation = Rc::new(|mutation| {
+        interaction::dispatch_ipc_mutation(mutation);
+    });
+
     let overview_canvas = ui::OverviewCanvas::new(
         Rc::clone(&activate_cluster),
         Rc::clone(&activate_cluster),
         Rc::clone(&zoom_back),
+        Rc::clone(&mutation),
     );
 
     window.set_content(Some(overview_canvas.widget()));
