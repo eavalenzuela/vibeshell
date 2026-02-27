@@ -429,6 +429,56 @@ Pointer zoom: Mod+WheelUp/Down (or Ctrl+Wheel on touchpads) zooms around pointer
 
 Clamp zoom scale to [0.35, 2.50]; clamp viewport center after each pan/zoom to visible canvas bounds.
 
+Overview interaction performance contract (v1 minimum)
+
+Target frame behavior during drag/pan/zoom
+
+Target 60 FPS interaction on typical desktop hardware (<=16.7 ms frame budget) for overview drag/pan/zoom when rendering up to 30 visible cluster cards.
+
+Accept temporary degradation to 45 FPS (<=22.2 ms) during burst operations (output hotplug, first frame after zoom-level switch, or simultaneous cluster + viewport updates), but recovery to 60 FPS-equivalent pacing must occur within 500 ms.
+
+If frame time exceeds 33 ms for more than 3 consecutive frames during active gesture, system must prioritize input + transform updates and defer non-critical visuals (drop shadows, secondary labels, expensive edge guides) until frame time recovers.
+
+Implementation constraint: overview rendering path must keep cluster-card draw cost O(visible_cards) and avoid synchronous WM tree queries during gesture frames.
+
+Throttling/debouncing rules for model writes during drag
+
+During pointer drag, update overlay-local preview every coalesced input frame, but throttle daemon model position writes to at most 30 Hz (one write every ~33 ms).
+
+Persisted state writes (disk/config snapshot) must be debounced to drag-end commit, with a safety flush at 250 ms if gesture stalls without release.
+
+Viewport pan/zoom state writes may be sent at up to 20 Hz during active gesture and must always send a final unthrottled commit on gesture end.
+
+Implementation constraint: overlay must maintain ephemeral drag state that can be rendered independently of daemon acknowledgment to prevent round-trip latency from blocking visual motion.
+
+Render invalidation strategy for overlay
+
+Default to dirty-region invalidation for overview interactions: invalidate previous and current cluster-card bounds (plus 8 px padding for shadows/guides), changed snap-guide segments, and HUD text rects.
+
+Use full-overlay redraw only for structural changes (output geometry change, scale-step crossing that changes card LOD tier, theme/font swap, or debug overlay toggle).
+
+Implementation constraint: renderer must track per-frame invalidation rectangles and union them; fallback full redraw is allowed only when dirty region union exceeds 60% of overlay area.
+
+Event coalescing policy for high-frequency input
+
+Pointer motion and wheel/scroll events are coalesced to one logical update per render tick; consume the most recent position/delta and accumulate wheel deltas since previous frame.
+
+Input sampling target: 120 Hz max ingestion, 60 Hz presentation. If ingestion exceeds budget, drop intermediate motion events but never reorder press/release or direction changes.
+
+Keyboard repeat pan events should coalesce by summing deltas within the same frame window.
+
+Implementation constraint: event queue must timestamp raw events in monotonic time and expose both raw count and coalesced count for diagnostics.
+
+Telemetry/logging hooks for jank diagnosis
+
+Emit latency markers for each interaction frame: input_received_ts, coalesced_dispatch_ts, frame_build_start_ts, frame_submit_ts, and present_done_ts (when available).
+
+Record derived metrics: input-to-dispatch, dispatch-to-submit, submit-to-present, and end-to-end input-to-present latency.
+
+When end-to-end latency exceeds 50 ms for 3 consecutive frames, emit structured warn log with gesture type, visible card count, dirty region area %, and whether full redraw fallback was active.
+
+Expose a lightweight ring-buffer trace endpoint (e.g., last 300 frames) via contwmctl dump-state --perf for post-hoc jank inspection without enabling verbose logging globally.
+
 Selection behavior
 
 Single click on cluster card: selects cluster, does not change zoom level, and updates focus ring.
