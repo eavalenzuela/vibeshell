@@ -423,7 +423,7 @@ fn spawn_dbus_service(
         loop {
             while let Ok(event) = dbus_receiver.try_recv() {
                 let signal_ctxt =
-                    zbus::SignalContext::new(&connection, "/org/freedesktop/Notifications")
+                    zbus::SignalContext::new(connection.inner(), "/org/freedesktop/Notifications")
                         .expect("valid signal path");
 
                 match event {
