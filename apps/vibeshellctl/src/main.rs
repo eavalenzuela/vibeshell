@@ -760,6 +760,7 @@ fn build_canvas_state_from_sway() -> Result<CanvasState, Box<dyn std::error::Err
     let fallback_cluster = clusters.keys().next().copied();
     let mut model = CanvasModel::new(
         CanvasState {
+            state_revision: 0,
             zoom: ZoomLevel::Overview,
             viewport: Viewport::default(),
             clusters: clusters.values().cloned().collect(),
@@ -1032,9 +1033,9 @@ fn log_ipc_request(
 
 fn log_ipc_response(response: &IpcResponse, module: &str, windows: usize, workspaces: usize) {
     let event_type = match response {
-        IpcResponse::Ack => "ack",
+        IpcResponse::Ack | IpcResponse::ClusterDragAck { .. } => "ack",
         IpcResponse::State(_) => "state",
-        IpcResponse::Error { .. } => "error",
+        IpcResponse::Error { .. } | IpcResponse::ClusterDragError { .. } => "error",
     };
 
     info!(
@@ -1119,6 +1120,7 @@ mod tests {
     #[test]
     fn dump_state_smoke_after_synthetic_message() {
         let canvas_state = CanvasState {
+            state_revision: 0,
             zoom: ZoomLevel::Cluster(7),
             viewport: Viewport::default(),
             clusters: vec![Cluster {

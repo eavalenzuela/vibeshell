@@ -122,6 +122,9 @@ fn fetch_state_via_ipc() -> Option<CanvasState> {
     let response: IpcResponse = serde_json::from_slice(&output.stdout).ok()?;
     match response {
         IpcResponse::State(state) => Some(state),
-        IpcResponse::Ack | IpcResponse::Error { .. } => None,
+        IpcResponse::Ack
+        | IpcResponse::ClusterDragAck { .. }
+        | IpcResponse::Error { .. }
+        | IpcResponse::ClusterDragError { .. } => None,
     }
 }
