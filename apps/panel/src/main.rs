@@ -20,6 +20,7 @@ use status::{PanelStatus, StatusCollector};
 struct RuntimePanelConfig {
     clock_format: String,
     status_poll_interval_ms: u64,
+    sway_event_debounce_ms: u64,
     audio_toggle_command: String,
     audio_mixer_command: Option<String>,
     network_settings_command: String,
@@ -31,6 +32,7 @@ impl RuntimePanelConfig {
         Self {
             clock_format: panel.clock_format.clone(),
             status_poll_interval_ms: panel.status_poll_interval_ms,
+            sway_event_debounce_ms: panel.sway_event_debounce_ms,
             audio_toggle_command: commands.volume.toggle_mute.clone(),
             audio_mixer_command: commands.volume.mixer.clone(),
             network_settings_command: panel.network_settings_command.clone(),
@@ -40,7 +42,6 @@ impl RuntimePanelConfig {
 }
 use sway::{PanelState, PanelUpdate, WorkspaceState};
 
-const RENDER_DEBOUNCE: Duration = Duration::from_millis(50);
 const SWAY_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const SWAY_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
 
@@ -227,34 +228,42 @@ fn build_ui(
     let (status_sender, status_receiver): (mpsc::Sender<PanelStatus>, mpsc::Receiver<PanelStatus>) =
         mpsc::channel();
 
-    thread::spawn(move || {
-        let mut backoff = SWAY_CONNECT_INITIAL_BACKOFF;
+    thread::spawn({
+        let runtime_config = Arc::clone(&runtime_config);
+        move || {
+            let mut backoff = SWAY_CONNECT_INITIAL_BACKOFF;
 
-        loop {
-            match sway::SwayClient::connect() {
-                Ok(client) => {
-                    tracing::info!("connected to sway ipc");
-                    if let Err(error) =
-                        client.run_listener(sender.clone(), Duration::from_millis(80))
-                    {
-                        tracing::warn!(?error, "sway listener exited; retrying connection");
+            loop {
+                match sway::SwayClient::connect() {
+                    Ok(client) => {
+                        let debounce_ms = runtime_config
+                            .lock()
+                            .expect("runtime config poisoned")
+                            .sway_event_debounce_ms
+                            .max(20);
+                        tracing::info!(debounce_ms, "connected to sway ipc");
+                        if let Err(error) =
+                            client.run_listener(sender.clone(), Duration::from_millis(debounce_ms))
+                        {
+                            tracing::warn!(?error, "sway listener exited; retrying connection");
+                        }
                     }
-                }
-                Err(error) => {
-                    tracing::warn!(
+                    Err(error) => {
+                        tracing::warn!(
                         ?error,
                         retry_ms = backoff.as_millis(),
                         "unable to connect to sway ipc; ensure sway is running and SWAYSOCK is set"
                     );
-                    eprintln!(
+                        eprintln!(
                         "panel: sway IPC unavailable. Start sway first (or export SWAYSOCK), retrying in {} ms.",
                         backoff.as_millis()
                     );
+                    }
                 }
-            }
 
-            thread::sleep(backoff);
-            backoff = (backoff * 2).min(SWAY_CONNECT_MAX_BACKOFF);
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(SWAY_CONNECT_MAX_BACKOFF);
+            }
         }
     });
 
@@ -290,46 +299,22 @@ fn build_ui(
         }
     });
 
-    let latest_state = Rc::new(RefCell::new(None::<PanelState>));
-    let scheduled_render = Rc::new(RefCell::new(None::<glib::SourceId>));
     let last_rendered = Rc::new(RefCell::new(None::<PanelState>));
 
     glib::timeout_add_local(Duration::from_millis(16), move || {
         while let Ok(update) = receiver.try_recv() {
-            let PanelUpdate::Snapshot(state) = update;
-            latest_state.replace(Some(state));
+            let PanelUpdate::Snapshot(next_state) = update;
 
-            if scheduled_render.borrow().is_some() {
+            if last_rendered
+                .borrow()
+                .as_ref()
+                .is_some_and(|rendered| rendered == &next_state)
+            {
                 continue;
             }
 
-            let latest_state = Rc::clone(&latest_state);
-            let scheduled_render = Rc::clone(&scheduled_render);
-            let last_rendered = Rc::clone(&last_rendered);
-            let workspaces = workspaces.clone();
-            let title = title.clone();
-            let scheduled_render_for_timeout = Rc::clone(&scheduled_render);
-
-            let source_id = glib::timeout_add_local_once(RENDER_DEBOUNCE, move || {
-                scheduled_render_for_timeout.borrow_mut().take();
-
-                let Some(next_state) = latest_state.borrow_mut().take() else {
-                    return;
-                };
-
-                if last_rendered
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|rendered| rendered == &next_state)
-                {
-                    return;
-                }
-
-                apply_state(&workspaces, &title, &next_state);
-                last_rendered.replace(Some(next_state));
-            });
-
-            scheduled_render.replace(Some(source_id));
+            apply_state(&workspaces, &title, &next_state);
+            last_rendered.replace(Some(next_state));
         }
 
         glib::ControlFlow::Continue
@@ -368,6 +353,12 @@ fn build_ui(
                         applied.push(format!(
                             "status_poll_interval_ms: {} -> {}",
                             old.status_poll_interval_ms, next.status_poll_interval_ms
+                        ));
+                    }
+                    if old.sway_event_debounce_ms != next.sway_event_debounce_ms {
+                        applied.push(format!(
+                            "sway_event_debounce_ms: {} -> {}",
+                            old.sway_event_debounce_ms, next.sway_event_debounce_ms
                         ));
                     }
                     if old.audio_toggle_command != next.audio_toggle_command {
