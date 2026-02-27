@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -14,6 +14,12 @@ use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use zbus::blocking::Connection;
 use zbus::interface;
 use zvariant::OwnedValue;
+
+const CLOSE_REASON_EXPIRED: u32 = 1;
+const CLOSE_REASON_DISMISSED: u32 = 2;
+const CLOSE_REASON_CLOSED_BY_CALL: u32 = 3;
+const DEFAULT_MAX_ON_SCREEN: usize = 4;
+const MAX_QUEUE_DEPTH: usize = 32;
 
 #[derive(Clone, Copy)]
 enum Urgency {
@@ -44,23 +50,39 @@ impl Urgency {
 }
 
 #[derive(Clone)]
+struct NotificationAction {
+    key: String,
+    label: String,
+}
+
+#[derive(Clone)]
 struct NotifyEvent {
     id: u32,
     summary: String,
     body: String,
     timeout_ms: Option<u64>,
     urgency: Urgency,
+    actions: Vec<NotificationAction>,
 }
 
 enum UiEvent {
     Notify(NotifyEvent),
-    Close(u32),
+    Close { id: u32, reason: u32 },
+}
+
+enum DbusEvent {
+    NotificationClosed { id: u32, reason: u32 },
+    ActionInvoked { id: u32, action_key: String },
 }
 
 #[derive(Default)]
 struct UiState {
+    root: Option<gtk::Box>,
     cards: HashMap<u32, gtk::Box>,
     generations: HashMap<u32, u64>,
+    queue: VecDeque<NotifyEvent>,
+    max_on_screen: usize,
+    dbus_sender: Option<mpsc::Sender<DbusEvent>>,
 }
 
 struct NotificationsService {
@@ -78,7 +100,7 @@ impl NotificationsService {
         _app_icon: &str,
         summary: &str,
         body: &str,
-        _actions: Vec<String>,
+        actions: Vec<String>,
         hints: HashMap<String, OwnedValue>,
         expire_timeout: i32,
     ) -> u32 {
@@ -88,13 +110,11 @@ impl NotificationsService {
             replaces_id
         };
 
-        let timeout_ms = if expire_timeout > 0 {
-            Some(expire_timeout as u64)
-        } else if expire_timeout == 0 {
-            None
-        } else {
-            Some(self.default_timeout_ms.load(Ordering::Relaxed))
-        };
+        let timeout_ms = timeout_from_request(
+            expire_timeout,
+            self.default_timeout_ms.load(Ordering::Relaxed),
+            Urgency::from_hints(&hints),
+        );
 
         let event = NotifyEvent {
             id,
@@ -102,6 +122,7 @@ impl NotificationsService {
             body: body.to_owned(),
             timeout_ms,
             urgency: Urgency::from_hints(&hints),
+            actions: parse_actions(actions),
         };
 
         if let Err(error) = self.sender.send(UiEvent::Notify(event)) {
@@ -112,16 +133,35 @@ impl NotificationsService {
     }
 
     fn close_notification(&self, id: u32) {
-        if let Err(error) = self.sender.send(UiEvent::Close(id)) {
+        if let Err(error) = self.sender.send(UiEvent::Close {
+            id,
+            reason: CLOSE_REASON_CLOSED_BY_CALL,
+        }) {
             tracing::warn!(?error, notification_id = id, "failed to close notification");
         }
     }
+
+    #[zbus(signal)]
+    fn notification_closed(
+        signal_ctxt: &zbus::SignalContext<'_>,
+        id: u32,
+        reason: u32,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn action_invoked(
+        signal_ctxt: &zbus::SignalContext<'_>,
+        id: u32,
+        action_key: &str,
+    ) -> zbus::Result<()>;
 
     fn get_capabilities(&self) -> Vec<String> {
         vec![
             "body".to_owned(),
             "body-markup".to_owned(),
             "icon-static".to_owned(),
+            "actions".to_owned(),
+            "persistence".to_owned(),
         ]
     }
 
@@ -199,15 +239,22 @@ fn build_ui(
 
     let default_timeout_ms = Arc::new(AtomicU64::new(notifd_config.default_timeout_ms));
     let (sender, receiver) = mpsc::channel::<UiEvent>();
-    spawn_dbus_service(sender, Arc::clone(&default_timeout_ms));
+    let dbus_sender = spawn_dbus_service(sender, Arc::clone(&default_timeout_ms));
 
     let state = Rc::new(std::cell::RefCell::new(UiState::default()));
+    {
+        let mut state = state.borrow_mut();
+        state.root = Some(root.clone());
+        state.max_on_screen = DEFAULT_MAX_ON_SCREEN;
+        state.dbus_sender = Some(dbus_sender);
+    }
 
+    let state_for_events = Rc::clone(&state);
     glib::timeout_add_local(Duration::from_millis(16), move || {
         for event in receiver.try_iter() {
             match event {
-                UiEvent::Notify(event) => add_card(&root, &state, event),
-                UiEvent::Close(id) => close_card(&state, id),
+                UiEvent::Notify(event) => enqueue_or_show(&state_for_events, event),
+                UiEvent::Close { id, reason } => close_card(&state_for_events, id, reason),
             }
         }
 
@@ -292,8 +339,13 @@ fn install_css() {
                 border: 1px solid alpha(@theme_fg_color, 0.18);
             }
 
+            .notification-card.normal {
+                border-color: alpha(@theme_fg_color, 0.18);
+            }
+
             .notification-card.critical {
                 border-color: #d64a4a;
+                background: alpha(#3d1111, 0.92);
             }
 
             .notification-summary {
@@ -315,7 +367,12 @@ fn install_css() {
     );
 }
 
-fn spawn_dbus_service(sender: mpsc::Sender<UiEvent>, default_timeout_ms: Arc<AtomicU64>) {
+fn spawn_dbus_service(
+    sender: mpsc::Sender<UiEvent>,
+    default_timeout_ms: Arc<AtomicU64>,
+) -> mpsc::Sender<DbusEvent> {
+    let (dbus_sender, dbus_receiver) = mpsc::channel::<DbusEvent>();
+
     thread::spawn(move || {
         let next_id = Arc::new(AtomicU32::new(1));
         let service = NotificationsService {
@@ -363,15 +420,78 @@ fn spawn_dbus_service(sender: mpsc::Sender<UiEvent>, default_timeout_ms: Arc<Ato
 
         tracing::info!("notification dbus interface ready");
 
-        // Keep the service connection alive for the process lifetime.
         loop {
-            thread::park_timeout(Duration::from_secs(60));
+            while let Ok(event) = dbus_receiver.try_recv() {
+                let signal_ctxt =
+                    zbus::SignalContext::new(&connection, "/org/freedesktop/Notifications")
+                        .expect("valid signal path");
+
+                match event {
+                    DbusEvent::NotificationClosed { id, reason } => {
+                        if let Err(error) =
+                            NotificationsService::notification_closed(&signal_ctxt, id, reason)
+                        {
+                            tracing::warn!(
+                                ?error,
+                                notification_id = id,
+                                "failed to emit NotificationClosed"
+                            );
+                        }
+                    }
+                    DbusEvent::ActionInvoked { id, action_key } => {
+                        if let Err(error) =
+                            NotificationsService::action_invoked(&signal_ctxt, id, &action_key)
+                        {
+                            tracing::warn!(
+                                ?error,
+                                notification_id = id,
+                                action_key,
+                                "failed to emit ActionInvoked"
+                            );
+                        }
+                    }
+                }
+            }
+
+            thread::park_timeout(Duration::from_millis(100));
         }
     });
+
+    dbus_sender
 }
 
-fn add_card(root: &gtk::Box, state: &Rc<std::cell::RefCell<UiState>>, event: NotifyEvent) {
-    close_card(state, event.id);
+fn enqueue_or_show(state: &Rc<std::cell::RefCell<UiState>>, event: NotifyEvent) {
+    close_card(state, event.id, CLOSE_REASON_CLOSED_BY_CALL);
+
+    {
+        let mut state = state.borrow_mut();
+        if let Some(index) = state.queue.iter().position(|queued| queued.id == event.id) {
+            state.queue.remove(index);
+        }
+
+        if state.cards.len() >= state.max_on_screen {
+            state.queue.push_back(event);
+            if state.queue.len() > MAX_QUEUE_DEPTH {
+                state.queue.pop_front();
+            }
+            return;
+        }
+    }
+
+    add_card(state, event);
+}
+
+fn add_card(state: &Rc<std::cell::RefCell<UiState>>, event: NotifyEvent) {
+    let root = {
+        let state_ref = state.borrow();
+        state_ref
+            .root
+            .clone()
+            .expect("notification root should be initialized")
+    };
+
+    let id = event.id;
+    let actions = event.actions;
 
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -398,7 +518,6 @@ fn add_card(root: &gtk::Box, state: &Rc<std::cell::RefCell<UiState>>, event: Not
 
     header.append(&summary);
     header.append(&close_button);
-
     card.append(&header);
 
     if !event.body.is_empty() {
@@ -409,55 +528,130 @@ fn add_card(root: &gtk::Box, state: &Rc<std::cell::RefCell<UiState>>, event: Not
         card.append(&body);
     }
 
+    if !actions.is_empty() {
+        let actions_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .build();
+
+        for action in actions {
+            let button = gtk::Button::with_label(&action.label);
+            let action_key = action.key;
+            let state_for_action = Rc::clone(state);
+            button.connect_clicked(move |_| {
+                emit_dbus_event(
+                    &state_for_action,
+                    DbusEvent::ActionInvoked {
+                        id,
+                        action_key: action_key.clone(),
+                    },
+                );
+                close_card(&state_for_action, id, CLOSE_REASON_DISMISSED);
+            });
+            actions_row.append(&button);
+        }
+
+        card.append(&actions_row);
+    }
+
     root.prepend(&card);
 
     let generation = {
         let mut state = state.borrow_mut();
-        state.cards.insert(event.id, card.clone());
-        let generation = state.generations.entry(event.id).or_insert(0);
+        state.cards.insert(id, card.clone());
+        let generation = state.generations.entry(id).or_insert(0);
         *generation += 1;
         *generation
     };
 
     let state_for_close = Rc::clone(state);
-    let id_for_close = event.id;
     close_button.connect_clicked(move |_| {
-        close_card(&state_for_close, id_for_close);
+        close_card(&state_for_close, id, CLOSE_REASON_DISMISSED);
     });
-
-    tracing::debug!(
-        notification_id = event.id,
-        timeout_ms = event.timeout_ms,
-        "rendered notification"
-    );
 
     if let Some(timeout_ms) = event.timeout_ms {
         let state_for_timeout = Rc::clone(state);
-        let id_for_timeout = event.id;
-
         glib::timeout_add_local_once(Duration::from_millis(timeout_ms), move || {
-            let current_generation = state_for_timeout
-                .borrow()
-                .generations
-                .get(&id_for_timeout)
-                .copied();
+            let current_generation = state_for_timeout.borrow().generations.get(&id).copied();
 
             if current_generation == Some(generation) {
-                close_card(&state_for_timeout, id_for_timeout);
+                close_card(&state_for_timeout, id, CLOSE_REASON_EXPIRED);
             }
         });
     }
 }
 
-fn close_card(state: &Rc<std::cell::RefCell<UiState>>, id: u32) {
-    let card = {
+fn close_card(state: &Rc<std::cell::RefCell<UiState>>, id: u32, reason: u32) {
+    let (card, next, removed_queued) = {
         let mut state = state.borrow_mut();
         state.generations.remove(&id);
-        state.cards.remove(&id)
+        let card = state.cards.remove(&id);
+
+        let removed_queued = if card.is_none() {
+            if let Some(index) = state.queue.iter().position(|queued| queued.id == id) {
+                state.queue.remove(index);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let next = if card.is_some() {
+            state.queue.pop_front()
+        } else {
+            None
+        };
+
+        (card, next, removed_queued)
     };
 
     if let Some(card) = card {
         card.unparent();
-        tracing::debug!(notification_id = id, "closed notification");
+        emit_dbus_event(state, DbusEvent::NotificationClosed { id, reason });
+    } else if removed_queued {
+        emit_dbus_event(state, DbusEvent::NotificationClosed { id, reason });
+    }
+
+    if let Some(next) = next {
+        add_card(state, next);
+    }
+}
+
+fn emit_dbus_event(state: &Rc<std::cell::RefCell<UiState>>, event: DbusEvent) {
+    if let Some(sender) = state.borrow().dbus_sender.as_ref() {
+        if let Err(error) = sender.send(event) {
+            tracing::warn!(?error, "failed to send dbus signal event");
+        }
+    }
+}
+
+fn parse_actions(actions: Vec<String>) -> Vec<NotificationAction> {
+    actions
+        .chunks_exact(2)
+        .map(|chunk| NotificationAction {
+            key: chunk[0].clone(),
+            label: chunk[1].clone(),
+        })
+        .collect()
+}
+
+fn timeout_from_request(
+    expire_timeout: i32,
+    default_timeout_ms: u64,
+    urgency: Urgency,
+) -> Option<u64> {
+    if expire_timeout > 0 {
+        return Some(expire_timeout as u64);
+    }
+
+    if expire_timeout == 0 {
+        return None;
+    }
+
+    match urgency {
+        Urgency::Critical => None,
+        Urgency::Normal => Some(default_timeout_ms),
     }
 }
