@@ -57,12 +57,18 @@ fn main() {
     let runtime_panel_config = RuntimePanelConfig::from_sections(&loaded.panel, &loaded.commands);
 
     let (_, reload_rx) = common::spawn_reload_listener();
+    let reload_rx = Rc::new(RefCell::new(Some(reload_rx)));
 
     let app = adw::Application::builder()
         .application_id("com.vibeshell.panel")
         .build();
 
     app.connect_activate(move |app| {
+        let Some(reload_rx) = reload_rx.borrow_mut().take() else {
+            tracing::warn!("activate handler called more than once; panel UI already initialized");
+            return;
+        };
+
         build_ui(
             app,
             panel_config.clone(),
@@ -386,18 +392,21 @@ fn build_ui(
 
                     *runtime_config.lock().expect("runtime config poisoned") = next;
 
+                    let applied_summary = if applied.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        applied.join(", ")
+                    };
+                    let restart_required_summary = if restart_required.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        restart_required.join(", ")
+                    };
+
                     tracing::info!(
                         trigger = reason.as_str(),
-                        applied = if applied.is_empty() {
-                            "none"
-                        } else {
-                            &applied.join(", ")
-                        },
-                        restart_required = if restart_required.is_empty() {
-                            "none"
-                        } else {
-                            &restart_required.join(", ")
-                        },
+                        applied = applied_summary,
+                        restart_required = restart_required_summary,
                         "panel config reload processed"
                     );
                 }
