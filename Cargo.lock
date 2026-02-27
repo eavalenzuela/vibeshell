@@ -1893,6 +1893,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "common",
+ "serde",
+ "serde_json",
  "swayipc",
  "tracing",
 ]
