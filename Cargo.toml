@@ -4,6 +4,7 @@ members = [
   "apps/panel",
   "apps/launcher",
   "apps/notifd",
+  "apps/overlay",
   "crates/common",
   "crates/config",
   "crates/sway",

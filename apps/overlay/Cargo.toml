@@ -1,0 +1,17 @@
+[package]
+name = "overlay"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { path = "../../crates/common" }
+tracing.workspace = true
+gtk4 = "0.8"
+adw = { package = "libadwaita", version = "0.6" }
+gtk4-layer-shell = "0.3"
+serde_json = "1"
+sway = { path = "../../crates/sway" }
+
+[lints]
+workspace = true

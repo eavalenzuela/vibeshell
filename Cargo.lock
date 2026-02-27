@@ -1228,6 +1228,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "overlay"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "gtk4",
+ "gtk4-layer-shell",
+ "libadwaita",
+ "serde_json",
+ "sway",
+ "tracing",
+]
+
+[[package]]
 name = "panel"
 version = "0.1.0"
 dependencies = [

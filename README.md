@@ -7,6 +7,7 @@ Current workspace apps:
 - `panel`: top bar with workspace state, focused window title, and a clock
 - `launcher`: app launcher that discovers and launches `.desktop` applications
 - `notifd`: a basic `org.freedesktop.Notifications` daemon with on-screen cards
+- `overlay`: layer-shell cluster overview cards driven by `GetState` IPC
 
 ---
 
@@ -218,6 +219,8 @@ Subcommands:
 - `restart <component>` — stops and re-launches one component (`panel`, `launcher`, or `notifd`).
 - `logs <component>` — filters captured nested-session logs for one component.
 - `logout` — ends the current Sway session and returns to the display-manager login screen.
+- `ipc get-state [--pretty]` — returns the IPC `GetState` response as JSON.
+- `ipc activate-cluster <cluster_id>` — activates/selects the cluster through IPC.
 
 Examples for nested Sway development:
 
@@ -247,6 +250,7 @@ Notes:
 
 - `logs` reads from `/tmp/vibeshell-nested.log` by default. Override with `VIBESHELL_LOG_FILE=/path/to/file`.
 - `restart` respects `VIBESHELL_PANEL_CMD`, `VIBESHELL_LAUNCHER_CMD`, and `VIBESHELL_NOTIFD_CMD` when set.
+- Overlay interaction smoke checklist: `./scripts/overlay-interaction-checklist.sh`.
 
 ## Useful development commands
 
