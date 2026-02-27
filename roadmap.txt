@@ -327,7 +327,7 @@ zoom in/out changes layout mode
 
 Exit criteria: focus mode is useful and predictable (no window shuffle, no flicker).
 
-Phase 4 — Overview becomes real (visual navigation)
+Phase 4A — Overview becomes real (core visual navigation)
 
 Overview overlay:
 
@@ -336,6 +336,18 @@ spatial positions of clusters on a canvas
 pan/zoom the overlay itself
 
 drag clusters around
+
+deterministic interaction/state behavior across repeated Overview <-> Cluster <-> Focus transitions
+
+Phase 4B — Overview polish (not required for Phase 4A sign-off)
+
+snap-to affordances for drag/move workflows
+
+inertial panning behavior and feel tuning
+
+animation timing/easing tuning for overview transitions and recentering
+
+Dependency note: complete this polish track alongside/after Phase 6 performance polish so interaction smoothness work is informed by measured frame-time/input-latency behavior.
 
 Phase 4 data contract
 
@@ -399,7 +411,7 @@ If external updates affect other clusters, merge them live without interrupting 
 
 On drag end with stale base_version, either rebase delta onto latest position or reject with snap-back; pick one policy and keep it consistent.
 
-Add “snap-to” and inertial feel later (optional)
+Add “snap-to” and inertial feel in Phase 4B (not required for Phase 4A sign-off; see Phase 6 dependency note above)
 
 Phase 4 Interaction Spec
 
@@ -497,7 +509,7 @@ Drag start threshold: 8 px pointer movement from press point before card enters 
 
 Live preview: card follows pointer in overlay space; connected edges/nearby snap guides render in preview layer only.
 
-Snap preview: show target ghost position when within 24 px of grid line, neighboring card centerline, or output work-area center.
+Snap preview (Phase 4B polish; not required for Phase 4A sign-off): show target ghost position when within 24 px of grid line, neighboring card centerline, or output work-area center.
 
 Commit keys: PointerLeftRelease or Enter commits cluster position and writes to in-memory model.
 
@@ -537,7 +549,7 @@ Never place cluster card commit position outside global canvas min/max bounds; i
 
 On output hotplug/remove during Overview, remap viewport to primary output and preserve relative cluster coordinates.
 
-Phase 4 exit criteria (concrete checks)
+Phase 4A exit criteria (concrete checks)
 
 1. Cluster creation + spatial persistence
    - User can create a new cluster from Overview, position it on the canvas, and drag/reposition any existing cluster.
