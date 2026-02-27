@@ -193,9 +193,10 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
             let last_rendered = Rc::clone(&last_rendered);
             let workspaces = workspaces.clone();
             let title = title.clone();
+            let scheduled_render_for_timeout = Rc::clone(&scheduled_render);
 
             let source_id = glib::timeout_add_local_once(RENDER_DEBOUNCE, move || {
-                scheduled_render.borrow_mut().take();
+                scheduled_render_for_timeout.borrow_mut().take();
 
                 let Some(next_state) = latest_state.borrow_mut().take() else {
                     return;
