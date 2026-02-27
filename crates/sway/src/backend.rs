@@ -160,6 +160,25 @@ pub struct ClusterLayoutInput {
     pub windows: Vec<WindowId>,
     /// Fallback ordering key for windows not present in `windows`.
     pub first_seen_at: HashMap<WindowId, u64>,
+    /// Windows excluded from tiled cluster reflow/geometry for this frame.
+    pub excluded_windows: HashMap<WindowId, LayoutExclusionReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutExclusionReason {
+    FullscreenTemporaryOverride,
+    TransientDialogAttached,
+    OverlayOrPopup,
+}
+
+impl LayoutExclusionReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FullscreenTemporaryOverride => "fullscreen_temporary_override",
+            Self::TransientDialogAttached => "transient_dialog_attached_to_parent",
+            Self::OverlayOrPopup => "overlay_or_popup",
+        }
+    }
 }
 
 fn canonical_cluster_window_order(cluster: &ClusterLayoutInput) -> Vec<WindowId> {
@@ -167,6 +186,15 @@ fn canonical_cluster_window_order(cluster: &ClusterLayoutInput) -> Vec<WindowId>
     let mut seen = BTreeSet::new();
 
     for &window_id in &cluster.windows {
+        if let Some(reason) = cluster.excluded_windows.get(&window_id) {
+            tracing::info!(
+                cluster_id = cluster.cluster_id,
+                window_id,
+                reason = reason.as_str(),
+                "excluding window from cluster reflow"
+            );
+            continue;
+        }
         if seen.insert(window_id) {
             explicit.push(window_id);
         }
@@ -176,6 +204,15 @@ fn canonical_cluster_window_order(cluster: &ClusterLayoutInput) -> Vec<WindowId>
         .first_seen_at
         .iter()
         .filter_map(|(&window_id, &first_seen)| {
+            if let Some(reason) = cluster.excluded_windows.get(&window_id) {
+                tracing::info!(
+                    cluster_id = cluster.cluster_id,
+                    window_id,
+                    reason = reason.as_str(),
+                    "excluding window from cluster geometry compute"
+                );
+                return None;
+            }
             (!seen.contains(&window_id)).then_some((window_id, first_seen))
         })
         .collect();
@@ -456,6 +493,7 @@ mod tests {
             },
             windows: vec![42, 43],
             first_seen_at: HashMap::from([(42, 10), (43, 20)]),
+            excluded_windows: HashMap::new(),
         }];
 
         let current = HashMap::from([
@@ -555,11 +593,33 @@ mod tests {
             },
             windows: vec![7, 9],
             first_seen_at: HashMap::from([(7, 30), (8, 10), (9, 20)]),
+            excluded_windows: HashMap::new(),
         };
 
         assert_eq!(canonical_cluster_window_order(&cluster), vec![7, 9, 8]);
     }
 
+    #[test]
+    fn canonical_order_excludes_policy_windows() {
+        let cluster = ClusterLayoutInput {
+            cluster_id: 9,
+            area: Rect {
+                x: 0,
+                y: 0,
+                width: 90,
+                height: 40,
+            },
+            windows: vec![1, 2, 3],
+            first_seen_at: HashMap::from([(1, 1), (2, 2), (3, 3), (4, 4)]),
+            excluded_windows: HashMap::from([
+                (1, LayoutExclusionReason::FullscreenTemporaryOverride),
+                (3, LayoutExclusionReason::TransientDialogAttached),
+                (4, LayoutExclusionReason::OverlayOrPopup),
+            ]),
+        };
+
+        assert_eq!(canonical_cluster_window_order(&cluster), vec![2]);
+    }
     #[test]
     fn enter_cluster_zoom_tracks_original_workspace_and_builds_move_commands() {
         let mut controller = WorkspaceTransitionController::new("__continuum");
