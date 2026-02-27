@@ -161,15 +161,22 @@ fn build_ui(app: &gtk::Application, notifd_config: NotifdConfig) {
         .default_width(notifd_config.width)
         .build();
 
-    window.set_decorated(false);
     window.set_resizable(false);
 
-    window.init_layer_shell();
-    window.set_layer(layer_shell::Layer::Overlay);
-    window.set_anchor(layer_shell::Edge::Top, true);
-    window.set_anchor(layer_shell::Edge::Right, true);
-    window.set_margin(layer_shell::Edge::Top, notifd_config.margin_top);
-    window.set_margin(layer_shell::Edge::Right, notifd_config.margin_right);
+    if layer_shell::is_supported() {
+        window.set_decorated(false);
+        window.init_layer_shell();
+        window.set_layer(layer_shell::Layer::Overlay);
+        window.set_anchor(layer_shell::Edge::Top, true);
+        window.set_anchor(layer_shell::Edge::Right, true);
+        window.set_margin(layer_shell::Edge::Top, notifd_config.margin_top);
+        window.set_margin(layer_shell::Edge::Right, notifd_config.margin_right);
+    } else {
+        tracing::warn!("layer shell protocol unavailable; falling back to a regular GTK window");
+        eprintln!(
+            "notifd: compositor does not support zwlr_layer_shell_v1; using regular window mode."
+        );
+    }
 
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)

@@ -44,16 +44,23 @@ fn build_ui(app: &adw::Application, panel_config: PanelConfig) {
         .default_height(panel_config.height)
         .build();
 
-    window.set_decorated(false);
-    window.set_resizable(false);
     window.set_size_request(-1, panel_config.height);
 
-    window.init_layer_shell();
-    window.set_layer(layer_shell::Layer::Top);
-    window.set_anchor(layer_shell::Edge::Top, true);
-    window.set_anchor(layer_shell::Edge::Left, true);
-    window.set_anchor(layer_shell::Edge::Right, true);
-    window.set_exclusive_zone(panel_config.height);
+    if layer_shell::is_supported() {
+        window.set_decorated(false);
+        window.set_resizable(false);
+        window.init_layer_shell();
+        window.set_layer(layer_shell::Layer::Top);
+        window.set_anchor(layer_shell::Edge::Top, true);
+        window.set_anchor(layer_shell::Edge::Left, true);
+        window.set_anchor(layer_shell::Edge::Right, true);
+        window.set_exclusive_zone(panel_config.height);
+    } else {
+        tracing::warn!("layer shell protocol unavailable; falling back to a regular GTK window");
+        eprintln!(
+            "panel: compositor does not support zwlr_layer_shell_v1; using regular window mode."
+        );
+    }
 
     let workspaces = gtk::Label::new(Some(""));
     workspaces.set_halign(gtk::Align::Start);
