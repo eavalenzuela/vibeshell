@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use adw::prelude::*;
-use config::Config;
+use config::{Config, LauncherConfig};
 use gtk::gdk;
 use gtk::glib;
 use gtk4 as gtk;
