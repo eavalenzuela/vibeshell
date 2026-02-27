@@ -81,7 +81,10 @@ start_component() {
   local cmd="$2"
   local attempt="$3"
 
-  setsid bash -lc "${cmd}" &
+  # Use a non-login shell so we keep the session's WAYLAND_DISPLAY as-is.
+  # Login shell init files can override display variables and cause components
+  # to connect to the host compositor instead of the nested Sway instance.
+  setsid bash -c "${cmd}" &
   local pid=$!
 
   COMPONENT_NAMES+=("${name}")
