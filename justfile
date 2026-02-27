@@ -19,13 +19,22 @@ run-notifd:
 fmt:
     cargo fmt --all
 
+fmt-check:
+    cargo fmt --check
+
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
 check:
     cargo check --workspace
 
-ci: fmt clippy check
+smoke-binaries:
+    cargo build -p panel --bins
+    cargo build -p launcher --bins
+    cargo build -p notifd --bins
+    cargo build -p vibeshellctl --bins
+
+ci: fmt-check clippy check smoke-binaries
 
 run-ctl *args:
     cargo run -p vibeshellctl -- {{args}}
