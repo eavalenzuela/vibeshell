@@ -34,6 +34,7 @@ pub struct PanelConfig {
     pub margin_start: i32,
     pub margin_end: i32,
     pub clock_format: String,
+    pub status_poll_interval_ms: u64,
 }
 
 impl Default for PanelConfig {
@@ -43,6 +44,7 @@ impl Default for PanelConfig {
             margin_start: 12,
             margin_end: 12,
             clock_format: "%H:%M".to_owned(),
+            status_poll_interval_ms: 5_000,
         }
     }
 }
