@@ -160,6 +160,10 @@ pub enum IpcRequest {
     SetFocusZoomTarget {
         window: WindowId,
     },
+    ZoomInMode,
+    ZoomOutMode,
+    CycleStripForward,
+    CycleStripBackward,
     CycleContextStrip {
         direction: ContextStripDirection,
     },
@@ -272,6 +276,20 @@ mod tests {
         let json = serde_json::to_string(&fixture).expect("serialize request");
         let parsed: IpcRequest = serde_json::from_str(&json).expect("parse request");
         assert_eq!(parsed, fixture);
+    }
+
+    #[test]
+    fn round_trip_ipc_phase3_requests() {
+        for fixture in [
+            IpcRequest::ZoomInMode,
+            IpcRequest::ZoomOutMode,
+            IpcRequest::CycleStripForward,
+            IpcRequest::CycleStripBackward,
+        ] {
+            let json = serde_json::to_string(&fixture).expect("serialize request");
+            let parsed: IpcRequest = serde_json::from_str(&json).expect("parse request");
+            assert_eq!(parsed, fixture);
+        }
     }
 
     #[test]

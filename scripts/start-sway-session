@@ -33,6 +33,14 @@ SHELL_QUIT_KEY="${VIBESHELL_SHELL_QUIT_KEY:-\$mod+Shift+e}"
 SHELL_QUIT_CMD="${VIBESHELL_SHELL_QUIT_CMD:-swaymsg exit}"
 SHELL_RESTART_KEY="${VIBESHELL_SHELL_RESTART_KEY:-\$mod+Shift+r}"
 SHELL_RESTART_CMD="${VIBESHELL_SHELL_RESTART_CMD:-swaymsg reload}"
+ZOOM_IN_MODE_KEY="${VIBESHELL_ZOOM_IN_MODE_KEY:-\$mod+equal}"
+ZOOM_IN_MODE_CMD="${VIBESHELL_ZOOM_IN_MODE_CMD:-vibeshellctl ipc zoom-in-mode}"
+ZOOM_OUT_MODE_KEY="${VIBESHELL_ZOOM_OUT_MODE_KEY:-\$mod+minus}"
+ZOOM_OUT_MODE_CMD="${VIBESHELL_ZOOM_OUT_MODE_CMD:-vibeshellctl ipc zoom-out-mode}"
+CYCLE_STRIP_FORWARD_KEY="${VIBESHELL_CYCLE_STRIP_FORWARD_KEY:-\$mod+period}"
+CYCLE_STRIP_FORWARD_CMD="${VIBESHELL_CYCLE_STRIP_FORWARD_CMD:-vibeshellctl ipc cycle-strip-forward}"
+CYCLE_STRIP_BACKWARD_KEY="${VIBESHELL_CYCLE_STRIP_BACKWARD_KEY:-\$mod+comma}"
+CYCLE_STRIP_BACKWARD_CMD="${VIBESHELL_CYCLE_STRIP_BACKWARD_CMD:-vibeshellctl ipc cycle-strip-backward}"
 
 cargo run -p sway --bin generate-bindings -- \
   --output "${SWAY_BINDINGS_OUTPUT}" \
@@ -53,7 +61,15 @@ cargo run -p sway --bin generate-bindings -- \
   --shell-quit-key "${SHELL_QUIT_KEY}" \
   --shell-quit-command "${SHELL_QUIT_CMD}" \
   --shell-restart-key "${SHELL_RESTART_KEY}" \
-  --shell-restart-command "${SHELL_RESTART_CMD}"
+  --shell-restart-command "${SHELL_RESTART_CMD}" \
+  --zoom-in-mode-key "${ZOOM_IN_MODE_KEY}" \
+  --zoom-in-mode-command "${ZOOM_IN_MODE_CMD}" \
+  --zoom-out-mode-key "${ZOOM_OUT_MODE_KEY}" \
+  --zoom-out-mode-command "${ZOOM_OUT_MODE_CMD}" \
+  --cycle-strip-forward-key "${CYCLE_STRIP_FORWARD_KEY}" \
+  --cycle-strip-forward-command "${CYCLE_STRIP_FORWARD_CMD}" \
+  --cycle-strip-backward-key "${CYCLE_STRIP_BACKWARD_KEY}" \
+  --cycle-strip-backward-command "${CYCLE_STRIP_BACKWARD_CMD}"
 
 if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
   echo "XDG_RUNTIME_DIR is required to start Sway." >&2

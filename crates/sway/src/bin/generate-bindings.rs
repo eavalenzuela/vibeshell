@@ -23,6 +23,14 @@ struct BindingConfig {
     shell_quit_command: String,
     shell_restart_key: String,
     shell_restart_command: String,
+    zoom_in_mode_key: String,
+    zoom_in_mode_command: String,
+    zoom_out_mode_key: String,
+    zoom_out_mode_command: String,
+    cycle_strip_forward_key: String,
+    cycle_strip_forward_command: String,
+    cycle_strip_backward_key: String,
+    cycle_strip_backward_command: String,
 }
 
 impl Default for BindingConfig {
@@ -48,6 +56,14 @@ impl Default for BindingConfig {
             shell_quit_command: "swaymsg exit".to_owned(),
             shell_restart_key: "$mod+Shift+r".to_owned(),
             shell_restart_command: "swaymsg reload".to_owned(),
+            zoom_in_mode_key: "$mod+equal".to_owned(),
+            zoom_in_mode_command: "vibeshellctl ipc zoom-in-mode".to_owned(),
+            zoom_out_mode_key: "$mod+minus".to_owned(),
+            zoom_out_mode_command: "vibeshellctl ipc zoom-out-mode".to_owned(),
+            cycle_strip_forward_key: "$mod+period".to_owned(),
+            cycle_strip_forward_command: "vibeshellctl ipc cycle-strip-forward".to_owned(),
+            cycle_strip_backward_key: "$mod+comma".to_owned(),
+            cycle_strip_backward_command: "vibeshellctl ipc cycle-strip-backward".to_owned(),
         }
     }
 }
@@ -81,6 +97,14 @@ fn parse_args() -> Result<BindingConfig, String> {
             "--shell-quit-command" => config.shell_quit_command = value,
             "--shell-restart-key" => config.shell_restart_key = value,
             "--shell-restart-command" => config.shell_restart_command = value,
+            "--zoom-in-mode-key" => config.zoom_in_mode_key = value,
+            "--zoom-in-mode-command" => config.zoom_in_mode_command = value,
+            "--zoom-out-mode-key" => config.zoom_out_mode_key = value,
+            "--zoom-out-mode-command" => config.zoom_out_mode_command = value,
+            "--cycle-strip-forward-key" => config.cycle_strip_forward_key = value,
+            "--cycle-strip-forward-command" => config.cycle_strip_forward_command = value,
+            "--cycle-strip-backward-key" => config.cycle_strip_backward_key = value,
+            "--cycle-strip-backward-command" => config.cycle_strip_backward_command = value,
             "--help" | "-h" => return Err(help_text()),
             _ => return Err(format!("unknown argument: {flag}\n\n{}", help_text())),
         }
@@ -113,6 +137,14 @@ fn help_text() -> String {
         "  --shell-quit-command <command>",
         "  --shell-restart-key <key>",
         "  --shell-restart-command <command>",
+        "  --zoom-in-mode-key <key>",
+        "  --zoom-in-mode-command <command>",
+        "  --zoom-out-mode-key <key>",
+        "  --zoom-out-mode-command <command>",
+        "  --cycle-strip-forward-key <key>",
+        "  --cycle-strip-forward-command <command>",
+        "  --cycle-strip-backward-key <key>",
+        "  --cycle-strip-backward-command <command>",
     ]
     .join("\n")
 }
@@ -151,6 +183,23 @@ fn render(config: &BindingConfig) -> String {
         &format!(
             "bindsym {} exec {}",
             config.brightness_down_key, config.brightness_down_command
+        ),
+        "",
+        &format!(
+            "bindsym {} exec {}",
+            config.zoom_in_mode_key, config.zoom_in_mode_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.zoom_out_mode_key, config.zoom_out_mode_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.cycle_strip_forward_key, config.cycle_strip_forward_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.cycle_strip_backward_key, config.cycle_strip_backward_command
         ),
         "",
         &format!(
@@ -203,6 +252,8 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.contains("bindsym $mod+space exec"));
         assert!(first.contains("bindsym XF86AudioRaiseVolume exec"));
+        assert!(first.contains("bindsym $mod+equal exec vibeshellctl ipc zoom-in-mode"));
+        assert!(first.contains("bindsym $mod+period exec vibeshellctl ipc cycle-strip-forward"));
         assert!(first.contains("bindsym $mod+Shift+r exec"));
     }
 }
