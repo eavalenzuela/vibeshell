@@ -175,13 +175,22 @@ impl NotificationsService {
     }
 }
 
+fn report_config_load_error(error: &config::ConfigLoadError) {
+    tracing::warn!(%error, "failed to load config, using defaults");
+    if let Some(issues) = error.validation_issues() {
+        for issue in issues {
+            tracing::warn!(field = %issue.field, message = %issue.message, "config validation issue");
+        }
+    }
+}
+
 fn main() {
     common::init_logging("notifd");
     tracing::info!(app = "notifd", "starting up");
 
     let notifd_config = Config::load()
         .unwrap_or_else(|error| {
-            tracing::warn!(?error, "failed to load config, using defaults");
+            report_config_load_error(&error);
             Config::default()
         })
         .notifications;

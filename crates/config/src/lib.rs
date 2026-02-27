@@ -3,11 +3,13 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+pub mod schema;
 
 const DEFAULT_CONFIG_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     #[serde(alias = "version")]
@@ -18,6 +20,7 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     pub keybindings: KeybindingsConfig,
     pub commands: CommandsConfig,
+    pub continuum: schema::ContinuumSchema,
 }
 
 impl Default for Config {
@@ -29,11 +32,12 @@ impl Default for Config {
             notifications: NotificationsConfig::default(),
             keybindings: KeybindingsConfig::default(),
             commands: CommandsConfig::default(),
+            continuum: schema::ContinuumSchema::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PanelConfig {
     pub height: i32,
@@ -59,7 +63,7 @@ impl Default for PanelConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LauncherConfig {
     pub window_width: i32,
@@ -79,7 +83,7 @@ impl Default for LauncherConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationsConfig {
     pub width: i32,
@@ -99,7 +103,7 @@ impl Default for NotificationsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {
     pub launcher_toggle: String,
@@ -127,7 +131,7 @@ impl Default for KeybindingsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommandsConfig {
     pub volume: VolumeCommands,
@@ -145,7 +149,7 @@ impl Default for CommandsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VolumeCommands {
     pub up: String,
@@ -165,7 +169,7 @@ impl Default for VolumeCommands {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrightnessCommands {
     pub up: String,
@@ -181,7 +185,7 @@ impl Default for BrightnessCommands {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PowerCommands {
     pub menu: String,
@@ -192,6 +196,27 @@ impl Default for PowerCommands {
         Self {
             menu: "wlogout".to_owned(),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidationIssue {
+    pub field: String,
+    pub message: String,
+}
+
+impl ValidationIssue {
+    pub fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ValidationIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.field, self.message)
     }
 }
 
@@ -207,8 +232,17 @@ pub enum ConfigLoadError {
     },
     Validation {
         path: PathBuf,
-        messages: Vec<String>,
+        issues: Vec<ValidationIssue>,
     },
+}
+
+impl ConfigLoadError {
+    pub fn validation_issues(&self) -> Option<&[ValidationIssue]> {
+        match self {
+            Self::Validation { issues, .. } => Some(issues),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ConfigLoadError {
@@ -228,12 +262,16 @@ impl fmt::Display for ConfigLoadError {
                     path.display()
                 )
             }
-            Self::Validation { path, messages } => {
+            Self::Validation { path, issues } => {
                 write!(
                     f,
                     "Config file at {} has invalid values: {}",
                     path.display(),
-                    messages.join("; ")
+                    issues
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
                 )
             }
         }
@@ -274,34 +312,74 @@ impl Config {
         let mut issues = Vec::new();
 
         if self.config_version == 0 {
-            issues.push("config_version must be >= 1".to_owned());
+            issues.push(ValidationIssue::new("config_version", "must be >= 1"));
         }
         if self.panel.height <= 0 {
-            issues.push("panel.height must be greater than 0".to_owned());
+            issues.push(ValidationIssue::new(
+                "panel.height",
+                "must be greater than 0",
+            ));
         }
         if self.panel.margin_start < 0 || self.panel.margin_end < 0 {
-            issues.push("panel margins must be >= 0".to_owned());
+            issues.push(ValidationIssue::new(
+                "panel.margin_start|margin_end",
+                "must be >= 0",
+            ));
         }
         if self.panel.clock_format.trim().is_empty() {
-            issues.push("panel.clock_format cannot be empty".to_owned());
+            issues.push(ValidationIssue::new(
+                "panel.clock_format",
+                "cannot be empty",
+            ));
         }
         if self.panel.sway_event_debounce_ms < 20 {
-            issues.push("panel.sway_event_debounce_ms must be >= 20".to_owned());
+            issues.push(ValidationIssue::new(
+                "panel.sway_event_debounce_ms",
+                "must be >= 20",
+            ));
         }
         if self.launcher.window_width <= 0 || self.launcher.window_height <= 0 {
-            issues.push(
-                "launcher.window_width and launcher.window_height must be greater than 0"
-                    .to_owned(),
-            );
+            issues.push(ValidationIssue::new(
+                "launcher.window_width|window_height",
+                "must be greater than 0",
+            ));
         }
         if self.launcher.max_results == 0 {
-            issues.push("launcher.max_results must be at least 1".to_owned());
+            issues.push(ValidationIssue::new(
+                "launcher.max_results",
+                "must be at least 1",
+            ));
         }
         if self.notifications.width <= 0 {
-            issues.push("notifications.width must be greater than 0".to_owned());
+            issues.push(ValidationIssue::new(
+                "notifications.width",
+                "must be greater than 0",
+            ));
         }
         if self.notifications.margin_top < 0 || self.notifications.margin_right < 0 {
-            issues.push("notifications margins must be >= 0".to_owned());
+            issues.push(ValidationIssue::new(
+                "notifications.margin_top|margin_right",
+                "must be >= 0",
+            ));
+        }
+
+        if self.continuum.zoom_step_sizes.overview_to_cluster <= 0.0 {
+            issues.push(ValidationIssue::new(
+                "continuum.zoom_step_sizes.overview_to_cluster",
+                "must be > 0",
+            ));
+        }
+        if self.continuum.zoom_step_sizes.cluster_to_focus <= 0.0 {
+            issues.push(ValidationIssue::new(
+                "continuum.zoom_step_sizes.cluster_to_focus",
+                "must be > 0",
+            ));
+        }
+        if self.continuum.zoom_step_sizes.keyboard_pan <= 0.0 {
+            issues.push(ValidationIssue::new(
+                "continuum.zoom_step_sizes.keyboard_pan",
+                "must be > 0",
+            ));
         }
 
         for (name, value) in [
@@ -322,7 +400,7 @@ impl Config {
             ("commands.power.menu", self.commands.power.menu.as_str()),
         ] {
             if value.trim().is_empty() {
-                issues.push(format!("{name} cannot be empty"));
+                issues.push(ValidationIssue::new(name, "cannot be empty"));
             }
         }
 
@@ -331,7 +409,7 @@ impl Config {
         } else {
             Err(ConfigLoadError::Validation {
                 path: path.to_path_buf(),
-                messages: issues,
+                issues,
             })
         }
     }
@@ -349,4 +427,62 @@ pub fn default_config_path() -> PathBuf {
     }
 
     PathBuf::from(".config").join(relative)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_minimal_payload_with_defaults() {
+        let cfg: Config = toml::from_str("").expect("parse empty config");
+        assert!(cfg.continuum.clusters_enabled);
+        assert_eq!(
+            cfg.continuum.strip_placement,
+            schema::StripPlacement::Bottom
+        );
+    }
+
+    #[test]
+    fn parses_old_payload_without_continuum_section() {
+        let cfg: Config = toml::from_str(
+            r#"
+            config_version = 1
+            [panel]
+            height = 40
+            "#,
+        )
+        .expect("parse legacy payload");
+
+        assert_eq!(cfg.panel.height, 40);
+        assert!(!cfg.continuum.auto_cluster);
+    }
+
+    #[test]
+    fn reports_field_level_validation_messages() {
+        let cfg: Config = toml::from_str(
+            r#"
+            config_version = 1
+            [continuum.zoom_step_sizes]
+            overview_to_cluster = -1.0
+            cluster_to_focus = 0.0
+            keyboard_pan = 120.0
+            "#,
+        )
+        .expect("parse config");
+
+        let err = cfg
+            .validate(Path::new("/tmp/test.toml"))
+            .expect_err("expected validation failure");
+
+        let issues = err
+            .validation_issues()
+            .expect("validation issues should be present");
+        assert!(issues
+            .iter()
+            .any(|issue| issue.field == "continuum.zoom_step_sizes.overview_to_cluster"));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.field == "continuum.zoom_step_sizes.cluster_to_focus"));
+    }
 }

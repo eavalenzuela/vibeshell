@@ -1,3 +1,5 @@
+pub mod contracts;
+
 use std::sync::mpsc;
 use std::sync::Once;
 use std::thread;

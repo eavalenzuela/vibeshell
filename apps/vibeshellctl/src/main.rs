@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use tracing::info;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use common::contracts::IpcRequest;
 use swayipc::Connection;
 
 #[derive(Debug, Parser)]
@@ -86,8 +87,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn reload() -> Result<(), Box<dyn std::error::Error>> {
+    let request = IpcRequest::ReloadConfig;
+    let sway_command = match request {
+        IpcRequest::ReloadConfig => "reload",
+        _ => return Err("unexpected IPC request for reload command".into()),
+    };
+
     let mut connection = Connection::new()?;
-    let replies = connection.run_command("reload")?;
+    let replies = connection.run_command(sway_command)?;
 
     for reply in replies {
         if let Err(error) = reply {

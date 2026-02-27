@@ -19,6 +19,15 @@ use xdg::DesktopEntry;
 
 const SWAY_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const SWAY_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+fn report_config_load_error(error: &config::ConfigLoadError) {
+    tracing::warn!(%error, "failed to load config, using defaults");
+    if let Some(issues) = error.validation_issues() {
+        for issue in issues {
+            tracing::warn!(field = %issue.field, message = %issue.message, "config validation issue");
+        }
+    }
+}
 const MATCH_EXACT_PREFIX: i32 = 4;
 const MATCH_WORD_PREFIX: i32 = 3;
 const MATCH_SUBSTRING: i32 = 2;
@@ -73,7 +82,7 @@ fn main() {
 
     let launcher_config = Config::load()
         .unwrap_or_else(|error| {
-            tracing::warn!(?error, "failed to load config, using defaults");
+            report_config_load_error(&error);
             Config::default()
         })
         .launcher;
