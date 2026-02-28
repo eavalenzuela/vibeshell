@@ -19,24 +19,13 @@ pub struct PersistedCluster {
     pub y: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PersistedOverviewState {
     pub viewport: Viewport,
     pub output_viewports: BTreeMap<String, Viewport>,
     pub clusters: Vec<PersistedCluster>,
     pub manual_window_assignments: BTreeMap<WindowId, ClusterId>,
-}
-
-impl Default for PersistedOverviewState {
-    fn default() -> Self {
-        Self {
-            viewport: Viewport::default(),
-            output_viewports: BTreeMap::new(),
-            clusters: Vec::new(),
-            manual_window_assignments: BTreeMap::new(),
-        }
-    }
 }
 
 impl PersistedOverviewState {
@@ -113,6 +102,12 @@ pub struct OverviewPersistence {
     debounce: Duration,
     pending: Option<PersistedOverviewState>,
     pending_deadline: Option<Instant>,
+}
+
+impl Default for OverviewPersistence {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OverviewPersistence {

@@ -93,6 +93,7 @@ struct NotificationsService {
 
 #[interface(name = "org.freedesktop.Notifications")]
 impl NotificationsService {
+    #[allow(clippy::too_many_arguments)]
     fn notify(
         &self,
         _app_name: &str,

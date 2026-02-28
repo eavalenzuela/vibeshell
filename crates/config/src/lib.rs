@@ -131,22 +131,12 @@ impl Default for KeybindingsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommandsConfig {
     pub volume: VolumeCommands,
     pub brightness: BrightnessCommands,
     pub power: PowerCommands,
-}
-
-impl Default for CommandsConfig {
-    fn default() -> Self {
-        Self {
-            volume: VolumeCommands::default(),
-            brightness: BrightnessCommands::default(),
-            power: PowerCommands::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

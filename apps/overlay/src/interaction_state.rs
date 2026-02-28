@@ -48,10 +48,6 @@ impl Default for InteractionMachine {
 }
 
 impl InteractionMachine {
-    pub fn state(&self) -> InteractionState {
-        self.state
-    }
-
     pub fn sync_zoom(&mut self, zoom: ZoomLevel) {
         let (event, next) = match zoom {
             ZoomLevel::Overview => (

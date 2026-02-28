@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub type WindowId = u64;
 pub type ClusterId = u64;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CanvasState {
     pub state_revision: u64,
@@ -15,20 +15,6 @@ pub struct CanvasState {
     pub clusters: Vec<Cluster>,
     pub windows: Vec<Window>,
     pub output: OutputState,
-}
-
-impl Default for CanvasState {
-    fn default() -> Self {
-        Self {
-            state_revision: 0,
-            zoom: ZoomLevel::default(),
-            viewport: Viewport::default(),
-            output_viewports: HashMap::new(),
-            clusters: Vec::new(),
-            windows: Vec::new(),
-            output: OutputState::default(),
-        }
-    }
 }
 
 impl CanvasState {
@@ -67,7 +53,7 @@ impl Default for Cluster {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Window {
     pub id: WindowId,
@@ -80,23 +66,6 @@ pub struct Window {
     pub transient_for: Option<WindowId>,
     pub manual_cluster_override: bool,
     pub manual_position_override: bool,
-}
-
-impl Default for Window {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            title: String::new(),
-            app_id: None,
-            class: None,
-            role: WindowRole::default(),
-            state: WindowState::default(),
-            cluster_id: None,
-            transient_for: None,
-            manual_cluster_override: false,
-            manual_position_override: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

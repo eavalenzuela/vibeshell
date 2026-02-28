@@ -171,7 +171,7 @@ impl Component {
         }
     }
 
-    fn from_log_target(&self) -> &'static str {
+    fn log_target(&self) -> &'static str {
         self.process_name()
     }
 }
@@ -803,7 +803,7 @@ fn logs(component: Component) -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
-    let target = component.from_log_target();
+    let target = component.log_target();
     let mut matched = 0usize;
     for line in io::BufReader::new(file).lines() {
         let line = line?;

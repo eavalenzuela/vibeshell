@@ -51,7 +51,7 @@ enum DragMode {
 
 #[derive(Clone, Copy)]
 enum MoveMode {
-    Keyboard { cluster_id: ClusterId },
+    Keyboard { _cluster_id: ClusterId },
 }
 
 struct WidgetState {
@@ -412,7 +412,9 @@ impl OverviewCanvas {
                             on_mutation(IpcMutation::EnterKeyboardMoveMode {
                                 cluster: cluster_id,
                             });
-                            state.move_mode = Some(MoveMode::Keyboard { cluster_id });
+                            state.move_mode = Some(MoveMode::Keyboard {
+                                _cluster_id: cluster_id,
+                            });
                             update_status(&state, &status_label);
                             area.queue_draw();
                             glib::Propagation::Stop
