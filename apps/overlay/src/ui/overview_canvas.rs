@@ -2,22 +2,23 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use common::contracts::{CanvasState, Cluster, ClusterId, Window};
+use common::contracts::{CanvasState, Cluster, ClusterId, Viewport, Window};
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
 
-use crate::interaction::IpcMutation;
+use crate::interaction::{dispatch_ipc_mutation_detached, IpcMutation};
 use crate::interaction_state::{EscapeAction, InteractionEvent, InteractionMachine};
 
 const CARD_WIDTH: f64 = 320.0;
 const CARD_HEIGHT: f64 = 140.0;
 const DRAG_THRESHOLD_PX: f64 = 8.0;
-const SCROLL_ZOOM_STEP: f64 = 1.10;
-const MIN_SCALE: f64 = 0.2;
-const MAX_SCALE: f64 = 6.0;
-const KEY_PAN_STEP: f64 = 48.0;
+const SCROLL_ZOOM_STEP: f64 = 1.12;
+const MIN_SCALE: f64 = 0.35;
+const MAX_SCALE: f64 = 2.50;
+const KEY_PAN_STEP: f64 = 96.0;
+const KEY_PAN_STEP_LARGE: f64 = 384.0;
 const KEY_MOVE_STEP: f64 = 32.0;
 const KEY_MOVE_STEP_LARGE: f64 = 128.0;
 const GLOBAL_CANVAS_MIN: f64 = -10000.0;
@@ -60,6 +61,8 @@ struct WidgetState {
     drag_mode: Option<DragMode>,
     move_mode: Option<MoveMode>,
     interaction: InteractionMachine,
+    daemon_viewport: Viewport,
+    has_local_viewport: bool,
 }
 
 impl OverviewCanvas {
@@ -99,6 +102,8 @@ impl OverviewCanvas {
             drag_mode: None,
             move_mode: None,
             interaction: InteractionMachine::default(),
+            daemon_viewport: Viewport::default(),
+            has_local_viewport: false,
         }));
 
         area.set_draw_func({
@@ -270,6 +275,15 @@ impl OverviewCanvas {
                 if matches!(state.drag_mode, Some(DragMode::DraggingCluster { .. })) {
                     on_mutation(IpcMutation::CommitClusterDrag);
                 }
+                if let Some(DragMode::Panning { .. }) = &state.drag_mode {
+                    let dx = state.canvas_state.viewport.x - state.daemon_viewport.x;
+                    let dy = state.canvas_state.viewport.y - state.daemon_viewport.y;
+                    if dx.abs() > 0.5 || dy.abs() > 0.5 {
+                        dispatch_ipc_mutation_detached(IpcMutation::OverviewPan { dx, dy });
+                        state.daemon_viewport = state.canvas_state.viewport.clone();
+                        state.has_local_viewport = true;
+                    }
+                }
                 if state.drag_mode.is_some() {
                     state.interaction.on_event(InteractionEvent::DragRelease);
                 }
@@ -293,6 +307,15 @@ impl OverviewCanvas {
                 };
                 state.canvas_state.viewport.scale =
                     (state.canvas_state.viewport.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
+                let delta = if dy < 0.0 { 1.0 } else { -1.0 };
+                let anchor_x = state.canvas_state.viewport.x;
+                let anchor_y = state.canvas_state.viewport.y;
+                dispatch_ipc_mutation_detached(IpcMutation::OverviewZoom {
+                    delta,
+                    anchor_x,
+                    anchor_y,
+                });
+                state.has_local_viewport = true;
                 area.queue_draw();
                 glib::Propagation::Stop
             }
@@ -401,6 +424,14 @@ impl OverviewCanvas {
                         state.canvas_state.viewport.scale = (state.canvas_state.viewport.scale
                             * SCROLL_ZOOM_STEP)
                             .clamp(MIN_SCALE, MAX_SCALE);
+                        let anchor_x = state.canvas_state.viewport.x;
+                        let anchor_y = state.canvas_state.viewport.y;
+                        dispatch_ipc_mutation_detached(IpcMutation::OverviewZoom {
+                            delta: 1.0,
+                            anchor_x,
+                            anchor_y,
+                        });
+                        state.has_local_viewport = true;
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
@@ -408,31 +439,94 @@ impl OverviewCanvas {
                         state.canvas_state.viewport.scale = (state.canvas_state.viewport.scale
                             / SCROLL_ZOOM_STEP)
                             .clamp(MIN_SCALE, MAX_SCALE);
+                        let anchor_x = state.canvas_state.viewport.x;
+                        let anchor_y = state.canvas_state.viewport.y;
+                        dispatch_ipc_mutation_detached(IpcMutation::OverviewZoom {
+                            delta: -1.0,
+                            anchor_x,
+                            anchor_y,
+                        });
+                        state.has_local_viewport = true;
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
                     gdk::Key::Up => {
+                        let step = if large_step {
+                            KEY_PAN_STEP_LARGE
+                        } else {
+                            KEY_PAN_STEP
+                        };
                         let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
-                        state.canvas_state.viewport.y -= KEY_PAN_STEP / scale;
+                        let delta = step / scale;
+                        state.canvas_state.viewport.y -= delta;
+                        dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
+                            dx: 0.0,
+                            dy: -delta,
+                        });
+                        state.daemon_viewport = state.canvas_state.viewport.clone();
+                        state.has_local_viewport = true;
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
                     gdk::Key::Down => {
+                        let step = if large_step {
+                            KEY_PAN_STEP_LARGE
+                        } else {
+                            KEY_PAN_STEP
+                        };
                         let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
-                        state.canvas_state.viewport.y += KEY_PAN_STEP / scale;
+                        let delta = step / scale;
+                        state.canvas_state.viewport.y += delta;
+                        dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
+                            dx: 0.0,
+                            dy: delta,
+                        });
+                        state.daemon_viewport = state.canvas_state.viewport.clone();
+                        state.has_local_viewport = true;
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
                     gdk::Key::Left => {
+                        let step = if large_step {
+                            KEY_PAN_STEP_LARGE
+                        } else {
+                            KEY_PAN_STEP
+                        };
                         let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
-                        state.canvas_state.viewport.x -= KEY_PAN_STEP / scale;
+                        let delta = step / scale;
+                        state.canvas_state.viewport.x -= delta;
+                        dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
+                            dx: -delta,
+                            dy: 0.0,
+                        });
+                        state.daemon_viewport = state.canvas_state.viewport.clone();
+                        state.has_local_viewport = true;
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
                     gdk::Key::Right => {
+                        let step = if large_step {
+                            KEY_PAN_STEP_LARGE
+                        } else {
+                            KEY_PAN_STEP
+                        };
                         let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
-                        state.canvas_state.viewport.x += KEY_PAN_STEP / scale;
+                        let delta = step / scale;
+                        state.canvas_state.viewport.x += delta;
+                        dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
+                            dx: delta,
+                            dy: 0.0,
+                        });
+                        state.daemon_viewport = state.canvas_state.viewport.clone();
+                        state.has_local_viewport = true;
                         area.queue_draw();
+                        glib::Propagation::Stop
+                    }
+                    gdk::Key::n | gdk::Key::N => {
+                        let name = format!("Cluster {}", state.canvas_state.clusters.len() + 1);
+                        let x = state.canvas_state.viewport.x;
+                        let y = state.canvas_state.viewport.y;
+                        on_mutation(IpcMutation::CreateCluster { name, x, y });
                         glib::Propagation::Stop
                     }
                     gdk::Key::r | gdk::Key::R => {
@@ -445,6 +539,10 @@ impl OverviewCanvas {
                         state.interaction.on_event(InteractionEvent::Enter);
                         if let Some(cluster_id) = state.selected_cluster {
                             on_activate(cluster_id);
+                        } else {
+                            status_label.set_text(
+                                "No cluster selected — use Tab to select or N to create one",
+                            );
                         }
                         glib::Propagation::Stop
                     }
@@ -500,7 +598,17 @@ impl OverviewCanvas {
     pub fn set_canvas_state(&self, state: CanvasState) {
         let mut data = self.data.borrow_mut();
         data.interaction.sync_zoom(state.zoom.clone());
+
+        // Always track what the daemon last acknowledged
+        data.daemon_viewport = state.viewport.clone();
+
+        // Preserve local viewport if the user has panned/zoomed since last poll
+        let preserve = data.has_local_viewport;
+        let local_viewport = data.canvas_state.viewport.clone();
         data.canvas_state = state;
+        if preserve {
+            data.canvas_state.viewport = local_viewport;
+        }
 
         if !data
             .canvas_state

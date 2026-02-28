@@ -2,7 +2,7 @@ use std::process::Command;
 
 use common::contracts::ClusterId;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum IpcMutation {
     SelectCluster {
         cluster: ClusterId,
@@ -28,9 +28,23 @@ pub enum IpcMutation {
     },
     CommitKeyboardMove,
     CancelKeyboardMove,
+    OverviewPan {
+        dx: f64,
+        dy: f64,
+    },
+    OverviewZoom {
+        delta: f64,
+        anchor_x: f64,
+        anchor_y: f64,
+    },
+    CreateCluster {
+        name: String,
+        x: f64,
+        y: f64,
+    },
 }
 
-pub fn dispatch_ipc_mutation(mutation: IpcMutation) {
+fn build_mutation_command(mutation: &IpcMutation) -> Command {
     let mut command = Command::new("vibeshellctl");
     command.arg("ipc");
 
@@ -80,9 +94,50 @@ pub fn dispatch_ipc_mutation(mutation: IpcMutation) {
         IpcMutation::CancelKeyboardMove => {
             command.arg("cancel-keyboard-move");
         }
+        IpcMutation::OverviewPan { dx, dy } => {
+            command.args(["overview-pan", &dx.to_string(), &dy.to_string()]);
+        }
+        IpcMutation::OverviewZoom {
+            delta,
+            anchor_x,
+            anchor_y,
+        } => {
+            command.args([
+                "overview-zoom",
+                &delta.to_string(),
+                &anchor_x.to_string(),
+                &anchor_y.to_string(),
+            ]);
+        }
+        IpcMutation::CreateCluster { name, x, y } => {
+            command.args([
+                "create-cluster",
+                name.as_str(),
+                &x.to_string(),
+                &y.to_string(),
+            ]);
+        }
     }
 
+    command
+}
+
+pub fn dispatch_ipc_mutation(mutation: IpcMutation) {
+    let debug_str = format!("{mutation:?}");
+    let mut command = build_mutation_command(&mutation);
     if let Err(error) = command.status() {
-        tracing::warn!(?error, ?mutation, "failed to execute IPC mutation");
+        tracing::warn!(
+            ?error,
+            mutation = debug_str,
+            "failed to execute IPC mutation"
+        );
+    }
+}
+
+pub fn dispatch_ipc_mutation_detached(mutation: IpcMutation) {
+    let debug_str = format!("{mutation:?}");
+    let mut command = build_mutation_command(&mutation);
+    if let Err(error) = command.spawn() {
+        tracing::warn!(?error, mutation = debug_str, "failed to spawn IPC mutation");
     }
 }

@@ -49,6 +49,7 @@ pub enum MutationType {
     CycleContextStrip,
     OverviewPan,
     OverviewZoom,
+    CreateCluster,
 }
 
 #[derive(Debug)]
@@ -120,6 +121,35 @@ impl StateOwner {
         );
     }
 
+    pub fn set_cluster_position_by_name(
+        &mut self,
+        name: &str,
+        x: f64,
+        y: f64,
+    ) -> Result<(), String> {
+        let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
+        if let Some(cluster) = self
+            .canvas_state
+            .clusters
+            .iter_mut()
+            .find(|c| c.name == name)
+        {
+            cluster.x = x;
+            cluster.y = y;
+            self.persist_after_mutation(&previous_state);
+            self.bump_revision(prior, MutationType::CreateCluster, ConflictOutcome::None);
+            Ok(())
+        } else {
+            self.bump_revision(
+                prior,
+                MutationType::CreateCluster,
+                ConflictOutcome::MissingCluster,
+            );
+            Err(json!({"error":"cluster_not_found_after_create","name":name}).to_string())
+        }
+    }
+
     pub fn overview_zoom(
         &mut self,
         delta: f64,
@@ -128,9 +158,9 @@ impl StateOwner {
         output: Option<&str>,
         link_outputs: bool,
     ) {
-        const MIN_SCALE: f64 = 0.2;
-        const MAX_SCALE: f64 = 6.0;
-        const STEP: f64 = 1.10;
+        const MIN_SCALE: f64 = 0.35;
+        const MAX_SCALE: f64 = 2.50;
+        const STEP: f64 = 1.12;
 
         let prior = self.canvas_state.state_revision;
         let previous_state = self.canvas_state.clone();

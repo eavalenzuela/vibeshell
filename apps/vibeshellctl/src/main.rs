@@ -78,6 +78,16 @@ enum IpcCommands {
     CycleContextStripNext,
     /// Cycle to the previous window in the context strip while in focus zoom.
     CycleContextStripPrevious,
+    /// Pan the overview viewport by (dx, dy).
+    OverviewPan { dx: f64, dy: f64 },
+    /// Zoom the overview viewport by delta at anchor position.
+    OverviewZoom {
+        delta: f64,
+        anchor_x: f64,
+        anchor_y: f64,
+    },
+    /// Create a new cluster with the given name at canvas position (x, y).
+    CreateCluster { name: String, x: f64, y: f64 },
 }
 
 static FOCUS_HANDOFF: OnceLock<Mutex<FocusHandoffController>> = OnceLock::new();
@@ -212,6 +222,30 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
             },
             false,
         ),
+        IpcCommands::OverviewPan { dx, dy } => (
+            IpcRequest::OverviewPan {
+                dx,
+                dy,
+                output: None,
+            },
+            false,
+        ),
+        IpcCommands::OverviewZoom {
+            delta,
+            anchor_x,
+            anchor_y,
+        } => (
+            IpcRequest::OverviewZoom {
+                delta,
+                anchor_canvas_x: anchor_x,
+                anchor_canvas_y: anchor_y,
+                output: None,
+            },
+            false,
+        ),
+        IpcCommands::CreateCluster { name, x, y } => {
+            (IpcRequest::CreateCluster { name, x, y }, false)
+        }
     };
 
     let response = dispatch_ipc_request(request)?;
@@ -409,6 +443,24 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 )
             });
             Ok(IpcResponse::Ack)
+        }
+        IpcRequest::CreateCluster { name, x, y } => {
+            let mut conn = Connection::new()?;
+            let escaped = name.replace('"', "\\\"");
+            for reply in conn.run_command(format!("workspace \"{escaped}\""))? {
+                if let Err(e) = reply {
+                    tracing::warn!(?e, "sway workspace create warning");
+                }
+            }
+            for reply in conn.run_command("workspace back_and_forth")? {
+                let _ = reply;
+            }
+            with_state_owner(|owner| owner.ingest_sway_facts())?;
+            let result = with_state_owner(|owner| owner.set_cluster_position_by_name(&name, x, y));
+            match result {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(msg) => Ok(IpcResponse::Error { message: msg }),
+            }
         }
         unsupported => Ok(IpcResponse::Error {
             message: json!({
