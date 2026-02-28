@@ -7,8 +7,8 @@ use std::sync::{Mutex, OnceLock};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use common::contracts::{
-    CanvasState, Cluster, ClusterId, ContextStripDirection, IpcRequest, IpcResponse, OutputState,
-    Viewport, Window, WindowId, WindowRole, WindowState, ZoomLevel,
+    CanvasState, ClusterId, ContextStripDirection, IpcRequest, IpcResponse, OutputState, Viewport,
+    Window, WindowId, ZoomLevel,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -943,6 +943,7 @@ fn running_label(running: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::contracts::{Cluster, WindowRole, WindowState};
 
     fn fixture_canvas_state(window_ids: &[WindowId]) -> CanvasState {
         let cluster_id = 7;

@@ -4,9 +4,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use adw::gtk::glib;
 use adw::prelude::*;
 use common::contracts::{CanvasState, ClusterId, IpcResponse};
-use gtk::glib;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 
 mod interaction;
@@ -46,7 +46,7 @@ fn build_ui(app: &adw::Application) {
         window.set_anchor(layer_shell::Edge::Right, true);
     }
 
-    let activate_cluster = Rc::new(|cluster_id: ClusterId| {
+    let activate_cluster: Rc<dyn Fn(ClusterId)> = Rc::new(|cluster_id: ClusterId| {
         let status = Command::new("vibeshellctl")
             .args(["ipc", "activate-cluster", &cluster_id.to_string()])
             .status();
@@ -55,7 +55,7 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
-    let zoom_back = Rc::new(|| {
+    let zoom_back: Rc<dyn Fn()> = Rc::new(|| {
         let status = Command::new("vibeshellctl")
             .args(["ipc", "zoom-out-mode"])
             .status();
@@ -64,7 +64,7 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
-    let mutation = Rc::new(|mutation| {
+    let mutation: Rc<dyn Fn(interaction::IpcMutation)> = Rc::new(|mutation| {
         interaction::dispatch_ipc_mutation(mutation);
     });
 
