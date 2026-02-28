@@ -223,6 +223,16 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn outputs_linked() -> bool {
+    env::var("VIBESHELL_LINK_OUTPUTS")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
 fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error>> {
     with_state_owner(|owner| owner.ingest_sway_facts())?;
 
@@ -376,6 +386,29 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 }
                 Err(message) => Ok(IpcResponse::Error { message }),
             }
+        }
+        IpcRequest::OverviewPan { dx, dy, output } => {
+            with_state_owner(|owner| {
+                owner.overview_pan(dx, dy, output.as_deref(), outputs_linked())
+            });
+            Ok(IpcResponse::Ack)
+        }
+        IpcRequest::OverviewZoom {
+            delta,
+            anchor_canvas_x,
+            anchor_canvas_y,
+            output,
+        } => {
+            with_state_owner(|owner| {
+                owner.overview_zoom(
+                    delta,
+                    anchor_canvas_x,
+                    anchor_canvas_y,
+                    output.as_deref(),
+                    outputs_linked(),
+                )
+            });
+            Ok(IpcResponse::Ack)
         }
         unsupported => Ok(IpcResponse::Error {
             message: json!({
@@ -969,6 +1002,7 @@ mod tests {
             state_revision: 0,
             zoom: ZoomLevel::Cluster(7),
             viewport: Viewport::default(),
+            output_viewports: std::collections::HashMap::new(),
             clusters: vec![Cluster {
                 id: 7,
                 name: "Work".into(),

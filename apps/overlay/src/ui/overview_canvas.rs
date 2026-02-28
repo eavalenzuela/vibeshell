@@ -20,6 +20,8 @@ const MAX_SCALE: f64 = 6.0;
 const KEY_PAN_STEP: f64 = 48.0;
 const KEY_MOVE_STEP: f64 = 32.0;
 const KEY_MOVE_STEP_LARGE: f64 = 128.0;
+const GLOBAL_CANVAS_MIN: f64 = -10000.0;
+const GLOBAL_CANVAS_MAX: f64 = 10000.0;
 
 pub struct OverviewCanvas {
     root: gtk::Box,
@@ -330,8 +332,19 @@ impl OverviewCanvas {
                                     .cluster_offsets
                                     .entry(cluster_id)
                                     .or_insert((0.0, 0.0));
-                                entry.0 += dx;
-                                entry.1 += dy;
+                                if let Some(cluster) = state
+                                    .canvas_state
+                                    .clusters
+                                    .iter()
+                                    .find(|c| c.id == cluster_id)
+                                {
+                                    let target_x = (cluster.x + entry.0 + dx)
+                                        .clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+                                    let target_y = (cluster.y + entry.1 + dy)
+                                        .clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+                                    entry.0 = target_x - cluster.x;
+                                    entry.1 = target_y - cluster.y;
+                                }
                             }
                             update_status(&state, &status_label);
                             area.queue_draw();
@@ -412,6 +425,12 @@ impl OverviewCanvas {
                     }
                     gdk::Key::Right => {
                         viewport.x += KEY_PAN_STEP / viewport.scale.max(MIN_SCALE);
+                        area.queue_draw();
+                        glib::Propagation::Stop
+                    }
+                    gdk::Key::r | gdk::Key::R => {
+                        recenter_selected_cluster(&mut state);
+                        update_status(&state, &status_label);
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
@@ -522,8 +541,17 @@ fn apply_cluster_drag(
         .cluster_offsets
         .entry(cluster_id)
         .or_insert((0.0, 0.0));
-    entry.0 = world_dx;
-    entry.1 = world_dy;
+    if let Some(cluster) = state
+        .canvas_state
+        .clusters
+        .iter()
+        .find(|c| c.id == cluster_id)
+    {
+        let target_x = (cluster.x + world_dx).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+        let target_y = (cluster.y + world_dy).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+        entry.0 = target_x - cluster.x;
+        entry.1 = target_y - cluster.y;
+    }
 
     area.queue_draw();
 }
@@ -562,6 +590,14 @@ fn update_status(state: &WidgetState, label: &gtk::Label) {
         }
     }
 
+    if selected_cluster_offscreen(
+        state,
+        f64::from(state.canvas_state.output.width),
+        f64::from(state.canvas_state.output.height),
+    ) {
+        parts.push("Selected cluster is off-screen (press R to recenter)".to_owned());
+    }
+
     let text = parts.join("  •  ");
     label.set_text(&text);
     label.set_tooltip_text(Some(&text));
@@ -597,6 +633,47 @@ fn traverse_selection(
     on_mutation(IpcMutation::SelectCluster {
         cluster: cluster_id,
     });
+}
+
+fn selected_cluster_offscreen(state: &WidgetState, width: f64, height: f64) -> bool {
+    let Some(cluster_id) = state.selected_cluster else {
+        return false;
+    };
+    let Some(cluster) = state
+        .canvas_state
+        .clusters
+        .iter()
+        .find(|c| c.id == cluster_id)
+    else {
+        return false;
+    };
+    let (sx, sy) = project_cluster(state, width.max(1.0), height.max(1.0), cluster);
+    let left = sx - CARD_WIDTH / 2.0;
+    let right = sx + CARD_WIDTH / 2.0;
+    let top = sy - CARD_HEIGHT / 2.0;
+    let bottom = sy + CARD_HEIGHT / 2.0;
+    right < 0.0 || left > width || bottom < 0.0 || top > height
+}
+
+fn recenter_selected_cluster(state: &mut WidgetState) {
+    let Some(cluster_id) = state.selected_cluster else {
+        return;
+    };
+    let Some(cluster) = state
+        .canvas_state
+        .clusters
+        .iter()
+        .find(|c| c.id == cluster_id)
+    else {
+        return;
+    };
+    let offset = state
+        .cluster_offsets
+        .get(&cluster_id)
+        .copied()
+        .unwrap_or((0.0, 0.0));
+    state.canvas_state.viewport.x = cluster.x + offset.0;
+    state.canvas_state.viewport.y = cluster.y + offset.1;
 }
 
 fn draw_canvas(state: &WidgetState, cr: &gtk::cairo::Context, width: f64, height: f64) {

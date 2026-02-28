@@ -23,6 +23,7 @@ pub struct PersistedCluster {
 #[serde(default)]
 pub struct PersistedOverviewState {
     pub viewport: Viewport,
+    pub output_viewports: BTreeMap<String, Viewport>,
     pub clusters: Vec<PersistedCluster>,
     pub manual_window_assignments: BTreeMap<WindowId, ClusterId>,
 }
@@ -31,6 +32,7 @@ impl Default for PersistedOverviewState {
     fn default() -> Self {
         Self {
             viewport: Viewport::default(),
+            output_viewports: BTreeMap::new(),
             clusters: Vec::new(),
             manual_window_assignments: BTreeMap::new(),
         }
@@ -41,6 +43,7 @@ impl PersistedOverviewState {
     pub fn from_canvas(state: &CanvasState) -> Self {
         Self {
             viewport: state.viewport.clone(),
+            output_viewports: state.output_viewports.clone().into_iter().collect(),
             clusters: state
                 .clusters
                 .iter()
@@ -62,6 +65,7 @@ impl PersistedOverviewState {
 
     pub fn apply_to_canvas_seed(&self, state: &mut CanvasState) {
         state.viewport = self.viewport.clone();
+        state.output_viewports = self.output_viewports.clone().into_iter().collect();
         state.clusters = self
             .clusters
             .iter()
@@ -80,6 +84,7 @@ impl PersistedOverviewState {
 
     pub fn merge_into_live_canvas(&self, state: &mut CanvasState) {
         state.viewport = self.viewport.clone();
+        state.output_viewports = self.output_viewports.clone().into_iter().collect();
 
         let mut coords = self
             .clusters

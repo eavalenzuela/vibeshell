@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -47,6 +47,8 @@ pub enum MutationType {
     ZoomInMode,
     ZoomOutMode,
     CycleContextStrip,
+    OverviewPan,
+    OverviewZoom,
 }
 
 #[derive(Debug)]
@@ -56,6 +58,7 @@ pub struct StateOwner {
     focus_freeze: FocusFreezeMetadata,
     persistence: OverviewPersistence,
     boot_persisted: Option<PersistedOverviewState>,
+    focused_output: Option<String>,
 }
 
 impl StateOwner {
@@ -73,6 +76,7 @@ impl StateOwner {
             focus_freeze: FocusFreezeMetadata::default(),
             persistence,
             boot_persisted,
+            focused_output: None,
         }
     }
 
@@ -82,6 +86,100 @@ impl StateOwner {
 
     pub fn selected_cluster_id(&self) -> Option<ClusterId> {
         self.selected_cluster_id
+    }
+
+    pub fn overview_pan(&mut self, dx: f64, dy: f64, output: Option<&str>, link_outputs: bool) {
+        let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
+        if link_outputs {
+            self.canvas_state.viewport.x += dx;
+            self.canvas_state.viewport.y += dy;
+            for viewport in self.canvas_state.output_viewports.values_mut() {
+                viewport.x += dx;
+                viewport.y += dy;
+            }
+        } else {
+            let output_name = output.or(self.focused_output.as_deref());
+            let entry = output_name
+                .map(|name| {
+                    self.canvas_state
+                        .output_viewports
+                        .entry(name.to_owned())
+                        .or_insert_with(|| self.canvas_state.viewport.clone())
+                })
+                .unwrap_or(&mut self.canvas_state.viewport);
+            entry.x += dx;
+            entry.y += dy;
+            self.canvas_state.viewport = entry.clone();
+        }
+        self.persist_after_mutation(&previous_state);
+        self.bump_revision(
+            prior,
+            MutationType::OverviewPan,
+            ConflictOutcome::PreservedViewport,
+        );
+    }
+
+    pub fn overview_zoom(
+        &mut self,
+        delta: f64,
+        anchor_canvas_x: f64,
+        anchor_canvas_y: f64,
+        output: Option<&str>,
+        link_outputs: bool,
+    ) {
+        const MIN_SCALE: f64 = 0.2;
+        const MAX_SCALE: f64 = 6.0;
+        const STEP: f64 = 1.10;
+
+        let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
+        let factor = if delta < 0.0 { 1.0 / STEP } else { STEP };
+        if link_outputs {
+            apply_zoom_to_viewport(
+                &mut self.canvas_state.viewport,
+                factor,
+                anchor_canvas_x,
+                anchor_canvas_y,
+                MIN_SCALE,
+                MAX_SCALE,
+            );
+            for viewport in self.canvas_state.output_viewports.values_mut() {
+                apply_zoom_to_viewport(
+                    viewport,
+                    factor,
+                    anchor_canvas_x,
+                    anchor_canvas_y,
+                    MIN_SCALE,
+                    MAX_SCALE,
+                );
+            }
+        } else {
+            let output_name = output.or(self.focused_output.as_deref());
+            let entry = output_name
+                .map(|name| {
+                    self.canvas_state
+                        .output_viewports
+                        .entry(name.to_owned())
+                        .or_insert_with(|| self.canvas_state.viewport.clone())
+                })
+                .unwrap_or(&mut self.canvas_state.viewport);
+            apply_zoom_to_viewport(
+                entry,
+                factor,
+                anchor_canvas_x,
+                anchor_canvas_y,
+                MIN_SCALE,
+                MAX_SCALE,
+            );
+            self.canvas_state.viewport = entry.clone();
+        }
+        self.persist_after_mutation(&previous_state);
+        self.bump_revision(
+            prior,
+            MutationType::OverviewZoom,
+            ConflictOutcome::PreservedViewport,
+        );
     }
 
     pub fn ingest_sway_facts(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -107,12 +205,55 @@ impl StateOwner {
         }
 
         let previous_viewport = self.canvas_state.viewport.clone();
+        let previous_focused_output = self.focused_output.clone();
         self.canvas_state.clusters = clusters;
         self.canvas_state.windows = snapshot.windows;
-        self.canvas_state.output = snapshot.output;
+        self.canvas_state.output = snapshot.output.clone();
+        self.focused_output = Some(snapshot.output.name.clone());
         self.canvas_state.viewport = previous_viewport;
+
         if let Some(persisted) = &self.boot_persisted {
             persisted.merge_into_live_canvas(&mut self.canvas_state);
+        }
+
+        let connected_outputs = snapshot.outputs.iter().cloned().collect::<HashSet<_>>();
+        self.canvas_state
+            .output_viewports
+            .retain(|name, _| connected_outputs.contains(name));
+        if let Some(current) = self.focused_output.clone() {
+            let default_viewport = self.canvas_state.viewport.clone();
+            let viewport = self
+                .canvas_state
+                .output_viewports
+                .entry(current)
+                .or_insert(default_viewport)
+                .clone();
+            self.canvas_state.viewport = viewport;
+        }
+
+        if let Some(previous_output) = previous_focused_output {
+            if !connected_outputs.contains(&previous_output) {
+                if let Some(primary) = snapshot.primary_output.clone() {
+                    if let Some(old_viewport) =
+                        self.canvas_state.output_viewports.remove(&previous_output)
+                    {
+                        self.canvas_state
+                            .output_viewports
+                            .entry(primary.clone())
+                            .or_insert(old_viewport);
+                    }
+                    if self.focused_output.as_deref() != Some(primary.as_str()) {
+                        self.focused_output = Some(primary.clone());
+                    }
+                    let fallback = self
+                        .canvas_state
+                        .output_viewports
+                        .get(&primary)
+                        .cloned()
+                        .unwrap_or_else(|| self.canvas_state.viewport.clone());
+                    self.canvas_state.viewport = fallback;
+                }
+            }
         }
         if self.canvas_state.viewport != Viewport::default() {
             outcome = ConflictOutcome::PreservedViewport;
@@ -443,6 +584,8 @@ struct SwaySnapshot {
     clusters: Vec<Cluster>,
     windows: Vec<Window>,
     output: OutputState,
+    outputs: Vec<String>,
+    primary_output: Option<String>,
 }
 
 fn sway_snapshot() -> Result<SwaySnapshot, Box<dyn std::error::Error>> {
@@ -485,11 +628,19 @@ fn sway_snapshot() -> Result<SwaySnapshot, Box<dyn std::error::Error>> {
         cluster.last_focus = cluster.windows.first().copied();
     }
 
+    let primary_output = outputs
+        .iter()
+        .find(|output| output.primary)
+        .map(|output| output.name.clone());
+    let connected_output_names = outputs
+        .iter()
+        .map(|output| output.name.clone())
+        .collect::<Vec<_>>();
     let output = outputs
-        .into_iter()
+        .iter()
         .find(|output| output.focused)
         .map(|output| OutputState {
-            name: output.name,
+            name: output.name.clone(),
             width: output.rect.width,
             height: output.rect.height,
             scale: output.scale.unwrap_or(1.0),
@@ -500,7 +651,27 @@ fn sway_snapshot() -> Result<SwaySnapshot, Box<dyn std::error::Error>> {
         clusters,
         windows,
         output,
+        outputs: connected_output_names,
+        primary_output,
     })
+}
+
+fn apply_zoom_to_viewport(
+    viewport: &mut Viewport,
+    factor: f64,
+    anchor_canvas_x: f64,
+    anchor_canvas_y: f64,
+    min_scale: f64,
+    max_scale: f64,
+) {
+    let old_scale = viewport.scale.max(min_scale);
+    let new_scale = (old_scale * factor).clamp(min_scale, max_scale);
+    if (new_scale - old_scale).abs() < f64::EPSILON {
+        return;
+    }
+    viewport.x = anchor_canvas_x - ((anchor_canvas_x - viewport.x) * (old_scale / new_scale));
+    viewport.y = anchor_canvas_y - ((anchor_canvas_y - viewport.y) * (old_scale / new_scale));
+    viewport.scale = new_scale;
 }
 
 fn collect_windows_from_tree(
