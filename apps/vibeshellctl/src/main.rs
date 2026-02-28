@@ -944,6 +944,42 @@ fn running_label(running: bool) -> &'static str {
 mod tests {
     use super::*;
 
+    fn fixture_canvas_state(window_ids: &[WindowId]) -> CanvasState {
+        let cluster_id = 7;
+        CanvasState {
+            state_revision: 1,
+            zoom: ZoomLevel::Overview,
+            viewport: Viewport::default(),
+            output_viewports: std::collections::HashMap::new(),
+            clusters: vec![Cluster {
+                id: cluster_id,
+                name: "fixture".into(),
+                x: 10.0,
+                y: 20.0,
+                enabled: true,
+                windows: window_ids.to_vec(),
+                last_focus: window_ids.last().copied(),
+                recency: window_ids.iter().rev().copied().collect(),
+            }],
+            windows: window_ids
+                .iter()
+                .map(|window_id| Window {
+                    id: *window_id,
+                    title: format!("Window {window_id}"),
+                    app_id: Some("fixture".into()),
+                    class: Some("fixture".into()),
+                    role: WindowRole::Normal,
+                    state: WindowState::Tiled,
+                    cluster_id: Some(cluster_id),
+                    transient_for: None,
+                    manual_cluster_override: false,
+                    manual_position_override: false,
+                })
+                .collect(),
+            output: OutputState::default(),
+        }
+    }
+
     fn fixture_dump_state() -> DumpState {
         DumpState {
             active_zoom: ZoomLevel::Cluster(7),
@@ -1044,5 +1080,57 @@ mod tests {
             render_dump_state_json(&fixture_dump_state(), true).expect("serialize pretty dump");
         assert!(json.contains("\n"));
         assert!(json.contains("\"active_cluster\""));
+    }
+
+    #[test]
+    fn deterministic_focus_plan_prefers_stable_last_focus_across_20_cycles() {
+        let fixtures = [vec![101], vec![201, 202], vec![301, 302, 303, 304]];
+
+        for window_ids in fixtures {
+            let state = fixture_canvas_state(&window_ids);
+            let expected_focus = *window_ids.last().expect("fixture has windows");
+
+            for _ in 0..20 {
+                let plan =
+                    deterministic_focus_plan(&state, Some(7), None, ZoomLevel::Cluster(7), None);
+                assert!(
+                    matches!(plan, FocusPlan::FocusWindow(window_id) if window_id == expected_focus)
+                );
+
+                let focus_plan = deterministic_focus_plan(
+                    &state,
+                    Some(7),
+                    None,
+                    ZoomLevel::Focus(expected_focus),
+                    None,
+                );
+                assert!(
+                    matches!(focus_plan, FocusPlan::FocusWindow(window_id) if window_id == expected_focus)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deterministic_focus_plan_restores_pre_overview_focus_when_valid_over_20_cycles() {
+        let fixtures = [vec![401], vec![501, 502], vec![601, 602, 603, 604]];
+
+        for window_ids in fixtures {
+            let state = fixture_canvas_state(&window_ids);
+            let pre_overview_focus = window_ids[0];
+
+            for _ in 0..20 {
+                let plan = deterministic_focus_plan(
+                    &state,
+                    Some(7),
+                    None,
+                    ZoomLevel::Cluster(7),
+                    Some(pre_overview_focus),
+                );
+                assert!(
+                    matches!(plan, FocusPlan::FocusWindow(window_id) if window_id == pre_overview_focus)
+                );
+            }
+        }
     }
 }

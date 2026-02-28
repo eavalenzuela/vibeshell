@@ -265,6 +265,34 @@ pub enum IpcResponse {
 mod tests {
     use super::*;
 
+    fn fixture_cluster(id: ClusterId, window_ids: &[WindowId]) -> Cluster {
+        Cluster {
+            id,
+            name: format!("Cluster {id}"),
+            x: id as f64 * 10.0,
+            y: id as f64 * -5.0,
+            enabled: true,
+            windows: window_ids.to_vec(),
+            last_focus: window_ids.first().copied(),
+            recency: window_ids.to_vec(),
+        }
+    }
+
+    fn fixture_window(id: WindowId, cluster_id: ClusterId) -> Window {
+        Window {
+            id,
+            title: format!("Window {id}"),
+            app_id: Some("fixture-app".into()),
+            class: Some("fixture-class".into()),
+            role: WindowRole::Normal,
+            state: WindowState::Tiled,
+            cluster_id: Some(cluster_id),
+            transient_for: None,
+            manual_cluster_override: false,
+            manual_position_override: false,
+        }
+    }
+
     #[test]
     fn round_trip_state_fixture() {
         let fixture = CanvasState {
@@ -419,5 +447,38 @@ mod tests {
     fn old_minimal_state_payload_uses_defaults() {
         let parsed: CanvasState = serde_json::from_str("{}").expect("parse minimal state");
         assert_eq!(parsed, CanvasState::default());
+    }
+
+    #[test]
+    fn transition_fixtures_keep_window_order_after_20_round_trips() {
+        let fixtures = [
+            (1_u64, vec![101]),
+            (2_u64, vec![201, 202]),
+            (3_u64, vec![301, 302, 303, 304]),
+        ];
+
+        for (cluster_id, window_ids) in fixtures {
+            let mut state = CanvasState {
+                state_revision: 42,
+                zoom: ZoomLevel::Cluster(cluster_id),
+                viewport: Viewport::default(),
+                output_viewports: HashMap::new(),
+                clusters: vec![fixture_cluster(cluster_id, &window_ids)],
+                windows: window_ids
+                    .iter()
+                    .map(|window_id| fixture_window(*window_id, cluster_id))
+                    .collect(),
+                output: OutputState::default(),
+            };
+
+            for _ in 0..20 {
+                let json = serde_json::to_string(&state).expect("serialize state fixture");
+                state = serde_json::from_str(&json).expect("deserialize state fixture");
+            }
+
+            assert_eq!(state.clusters[0].windows, window_ids);
+            assert_eq!(state.clusters[0].recency, window_ids);
+            assert_eq!(state.zoom, ZoomLevel::Cluster(cluster_id));
+        }
     }
 }
