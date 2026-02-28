@@ -23,6 +23,7 @@ const KEY_MOVE_STEP_LARGE: f64 = 128.0;
 const GLOBAL_CANVAS_MIN: f64 = -10000.0;
 const GLOBAL_CANVAS_MAX: f64 = 10000.0;
 
+#[derive(Clone)]
 pub struct OverviewCanvas {
     root: gtk::Box,
     area: gtk::DrawingArea,
