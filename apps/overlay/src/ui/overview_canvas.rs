@@ -308,7 +308,6 @@ impl OverviewCanvas {
             let on_mutation = Rc::clone(&on_mutation);
             move |_, keyval, _, modifiers| {
                 let mut state = data.borrow_mut();
-                let viewport = &mut state.canvas_state.viewport;
                 let large_step = modifiers.contains(gdk::ModifierType::SHIFT_MASK);
 
                 if matches!(state.move_mode, Some(MoveMode::Keyboard { .. })) {
@@ -328,22 +327,23 @@ impl OverviewCanvas {
                             };
                             if let Some(cluster_id) = state.selected_cluster {
                                 on_mutation(IpcMutation::KeyboardMoveBy { dx, dy });
-                                let entry = state
-                                    .cluster_offsets
-                                    .entry(cluster_id)
-                                    .or_insert((0.0, 0.0));
-                                if let Some(cluster) = state
+                                if let Some((cluster_x, cluster_y)) = state
                                     .canvas_state
                                     .clusters
                                     .iter()
                                     .find(|c| c.id == cluster_id)
+                                    .map(|cluster| (cluster.x, cluster.y))
                                 {
-                                    let target_x = (cluster.x + entry.0 + dx)
+                                    let entry = state
+                                        .cluster_offsets
+                                        .entry(cluster_id)
+                                        .or_insert((0.0, 0.0));
+                                    let target_x = (cluster_x + entry.0 + dx)
                                         .clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-                                    let target_y = (cluster.y + entry.1 + dy)
+                                    let target_y = (cluster_y + entry.1 + dy)
                                         .clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-                                    entry.0 = target_x - cluster.x;
-                                    entry.1 = target_y - cluster.y;
+                                    entry.0 = target_x - cluster_x;
+                                    entry.1 = target_y - cluster_y;
                                 }
                             }
                             update_status(&state, &status_label);
@@ -397,34 +397,40 @@ impl OverviewCanvas {
                         }
                     }
                     gdk::Key::plus | gdk::Key::equal => {
-                        viewport.scale =
-                            (viewport.scale * SCROLL_ZOOM_STEP).clamp(MIN_SCALE, MAX_SCALE);
+                        state.canvas_state.viewport.scale = (state.canvas_state.viewport.scale
+                            * SCROLL_ZOOM_STEP)
+                            .clamp(MIN_SCALE, MAX_SCALE);
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
                     gdk::Key::minus | gdk::Key::underscore => {
-                        viewport.scale =
-                            (viewport.scale / SCROLL_ZOOM_STEP).clamp(MIN_SCALE, MAX_SCALE);
+                        state.canvas_state.viewport.scale = (state.canvas_state.viewport.scale
+                            / SCROLL_ZOOM_STEP)
+                            .clamp(MIN_SCALE, MAX_SCALE);
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
                     gdk::Key::Up => {
-                        viewport.y -= KEY_PAN_STEP / viewport.scale.max(MIN_SCALE);
+                        let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
+                        state.canvas_state.viewport.y -= KEY_PAN_STEP / scale;
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
                     gdk::Key::Down => {
-                        viewport.y += KEY_PAN_STEP / viewport.scale.max(MIN_SCALE);
+                        let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
+                        state.canvas_state.viewport.y += KEY_PAN_STEP / scale;
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
                     gdk::Key::Left => {
-                        viewport.x -= KEY_PAN_STEP / viewport.scale.max(MIN_SCALE);
+                        let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
+                        state.canvas_state.viewport.x -= KEY_PAN_STEP / scale;
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
                     gdk::Key::Right => {
-                        viewport.x += KEY_PAN_STEP / viewport.scale.max(MIN_SCALE);
+                        let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
+                        state.canvas_state.viewport.x += KEY_PAN_STEP / scale;
                         area.queue_draw();
                         glib::Propagation::Stop
                     }
@@ -505,12 +511,14 @@ impl OverviewCanvas {
             data.move_mode = None;
         }
 
-        data.cluster_offsets.retain(|cluster_id, _| {
-            data.canvas_state
-                .clusters
-                .iter()
-                .any(|c| c.id == *cluster_id)
-        });
+        let cluster_ids: std::collections::HashSet<_> = data
+            .canvas_state
+            .clusters
+            .iter()
+            .map(|cluster| cluster.id)
+            .collect();
+        data.cluster_offsets
+            .retain(|cluster_id, _| cluster_ids.contains(cluster_id));
 
         update_status(&data, &self.status_label);
         self.area.queue_draw();
