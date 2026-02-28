@@ -562,6 +562,7 @@ mod tests {
             state_revision: 0,
             zoom: ZoomLevel::Cluster(1),
             viewport: Viewport::default(),
+            output_viewports: std::collections::HashMap::new(),
             clusters: vec![
                 Cluster {
                     id: 1,
@@ -754,6 +755,7 @@ mod tests {
             state_revision: 0,
             zoom: ZoomLevel::Cluster(1),
             viewport: Viewport::default(),
+            output_viewports: std::collections::HashMap::new(),
             clusters: vec![Cluster {
                 id: 1,
                 name: "one".into(),

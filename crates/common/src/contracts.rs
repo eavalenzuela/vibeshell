@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 pub type WindowId = u64;
@@ -9,6 +11,7 @@ pub struct CanvasState {
     pub state_revision: u64,
     pub zoom: ZoomLevel,
     pub viewport: Viewport,
+    pub output_viewports: HashMap<String, Viewport>,
     pub clusters: Vec<Cluster>,
     pub windows: Vec<Window>,
     pub output: OutputState,
@@ -20,10 +23,19 @@ impl Default for CanvasState {
             state_revision: 0,
             zoom: ZoomLevel::default(),
             viewport: Viewport::default(),
+            output_viewports: HashMap::new(),
             clusters: Vec::new(),
             windows: Vec::new(),
             output: OutputState::default(),
         }
+    }
+}
+
+impl CanvasState {
+    pub fn viewport_for_output(&self, output: Option<&str>) -> Viewport {
+        output
+            .and_then(|name| self.output_viewports.get(name).cloned())
+            .unwrap_or_else(|| self.viewport.clone())
     }
 }
 
@@ -263,6 +275,14 @@ mod tests {
                 y: -13.0,
                 scale: 1.15,
             },
+            output_viewports: HashMap::from([(
+                "DP-1".to_owned(),
+                Viewport {
+                    x: 42.0,
+                    y: -13.0,
+                    scale: 1.15,
+                },
+            )]),
             clusters: vec![Cluster {
                 id: 7,
                 name: "Work".into(),
