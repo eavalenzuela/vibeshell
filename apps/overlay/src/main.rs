@@ -103,7 +103,7 @@ fn build_ui(app: &adw::Application) {
 
     {
         let last_state = Rc::clone(&last_state);
-        let overview_canvas = overview_canvas;
+        let overview_canvas = overview_canvas.clone();
         glib::timeout_add_local(Duration::from_millis(120), move || {
             let mut should_refresh = false;
             while rx.try_recv().is_ok() {
