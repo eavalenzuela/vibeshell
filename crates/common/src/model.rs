@@ -557,6 +557,48 @@ mod tests {
     use super::*;
     use crate::contracts::{OutputState, Viewport, WindowRole, WindowState};
 
+    fn fixture_window(id: WindowId, cluster_id: ClusterId) -> Window {
+        Window {
+            id,
+            title: format!("Window {id}"),
+            app_id: Some("fixture".into()),
+            class: Some("fixture".into()),
+            role: WindowRole::Normal,
+            state: WindowState::Tiled,
+            cluster_id: Some(cluster_id),
+            transient_for: None,
+            manual_cluster_override: false,
+            manual_position_override: false,
+        }
+    }
+
+    fn model_fixture_with_cluster_windows(window_ids: &[WindowId]) -> CanvasModel {
+        let cluster_id = 1;
+        let state = CanvasState {
+            state_revision: 0,
+            zoom: ZoomLevel::Cluster(cluster_id),
+            viewport: Viewport::default(),
+            output_viewports: std::collections::HashMap::new(),
+            clusters: vec![Cluster {
+                id: cluster_id,
+                name: "fixture".into(),
+                x: 0.0,
+                y: 0.0,
+                enabled: true,
+                windows: window_ids.to_vec(),
+                last_focus: window_ids.first().copied(),
+                recency: window_ids.to_vec(),
+            }],
+            windows: window_ids
+                .iter()
+                .map(|window_id| fixture_window(*window_id, cluster_id))
+                .collect(),
+            output: OutputState::default(),
+        };
+
+        CanvasModel::new(state, cluster_id).expect("fixture model should be valid")
+    }
+
     fn base_state() -> CanvasState {
         CanvasState {
             state_revision: 0,
@@ -828,5 +870,31 @@ mod tests {
                 manual_override: true,
             }
         );
+    }
+
+    #[test]
+    fn transition_cycles_preserve_deterministic_focus_order_for_1_2_and_3plus_windows() {
+        let fixtures = [vec![1001], vec![2001, 2002], vec![3001, 3002, 3003, 3004]];
+
+        for window_ids in fixtures {
+            let mut model = model_fixture_with_cluster_windows(&window_ids);
+            for cycle in 0..20 {
+                for (offset, window_id) in window_ids.iter().enumerate() {
+                    let result = model
+                        .on_focus_change(*window_id)
+                        .expect("focus update should succeed");
+                    if cycle == 0 && offset == 0 {
+                        assert_eq!(result, MutationResult::FocusNoop(*window_id));
+                    }
+                }
+            }
+
+            let cluster = model.state().clusters.first().expect("cluster exists");
+            let mut expected = window_ids.clone();
+            expected.reverse();
+            assert_eq!(cluster.recency, expected);
+            assert_eq!(cluster.last_focus, window_ids.last().copied());
+            assert_eq!(cluster.windows, window_ids);
+        }
     }
 }
