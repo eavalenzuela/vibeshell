@@ -164,8 +164,8 @@ pub enum IpcRequest {
         base_revision: u64,
     },
     UpdateClusterDrag {
-        pointer_canvas_x: f64,
-        pointer_canvas_y: f64,
+        cluster_x: f64,
+        cluster_y: f64,
     },
     CommitClusterDrag,
     CancelClusterDrag,
@@ -367,8 +367,8 @@ mod tests {
                 base_revision: 8,
             },
             IpcRequest::UpdateClusterDrag {
-                pointer_canvas_x: 130.0,
-                pointer_canvas_y: 460.0,
+                cluster_x: 130.0,
+                cluster_y: 460.0,
             },
             IpcRequest::CommitClusterDrag,
             IpcRequest::CancelClusterDrag,

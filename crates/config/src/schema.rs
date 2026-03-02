@@ -7,6 +7,7 @@ pub struct ContinuumSchema {
     pub zoom_step_sizes: ZoomStepSizes,
     pub strip_placement: StripPlacement,
     pub auto_cluster: bool,
+    pub assignment_hints: Vec<AssignmentHint>,
 }
 
 impl Default for ContinuumSchema {
@@ -16,8 +17,18 @@ impl Default for ContinuumSchema {
             zoom_step_sizes: ZoomStepSizes::default(),
             strip_placement: StripPlacement::default(),
             auto_cluster: false,
+            assignment_hints: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssignmentHint {
+    pub app_id: Option<String>,
+    pub class: Option<String>,
+    pub title_contains: Option<String>,
+    pub cluster: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

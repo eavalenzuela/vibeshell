@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 common = { path = "../../crates/common" }
+config = { path = "../../crates/config" }
 clap = { version = "4.5", features = ["derive"] }
 swayipc = "3"
 tracing.workspace = true

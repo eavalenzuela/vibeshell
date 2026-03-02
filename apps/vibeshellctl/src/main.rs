@@ -88,6 +88,19 @@ enum IpcCommands {
     },
     /// Create a new cluster with the given name at canvas position (x, y).
     CreateCluster { name: String, x: f64, y: f64 },
+    /// Begin dragging a cluster (records drag origin).
+    BeginClusterDrag {
+        cluster_id: u64,
+        pointer_canvas_x: f64,
+        pointer_canvas_y: f64,
+        base_revision: u64,
+    },
+    /// Update the dragged cluster's canvas position.
+    UpdateClusterDrag { cluster_x: f64, cluster_y: f64 },
+    /// Commit the cluster drag, persisting the new position.
+    CommitClusterDrag,
+    /// Cancel the cluster drag, reverting to the original position.
+    CancelClusterDrag,
 }
 
 static FOCUS_HANDOFF: OnceLock<Mutex<FocusHandoffController>> = OnceLock::new();
@@ -246,6 +259,32 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
         IpcCommands::CreateCluster { name, x, y } => {
             (IpcRequest::CreateCluster { name, x, y }, false)
         }
+        IpcCommands::BeginClusterDrag {
+            cluster_id,
+            pointer_canvas_x,
+            pointer_canvas_y,
+            base_revision,
+        } => (
+            IpcRequest::BeginClusterDrag {
+                cluster: cluster_id,
+                pointer_canvas_x,
+                pointer_canvas_y,
+                base_revision,
+            },
+            false,
+        ),
+        IpcCommands::UpdateClusterDrag {
+            cluster_x,
+            cluster_y,
+        } => (
+            IpcRequest::UpdateClusterDrag {
+                cluster_x,
+                cluster_y,
+            },
+            false,
+        ),
+        IpcCommands::CommitClusterDrag => (IpcRequest::CommitClusterDrag, false),
+        IpcCommands::CancelClusterDrag => (IpcRequest::CancelClusterDrag, false),
     };
 
     let response = dispatch_ipc_request(request)?;
@@ -267,8 +306,17 @@ fn outputs_linked() -> bool {
             )
         })
 }
+fn needs_sway_ingest(request: &IpcRequest) -> bool {
+    matches!(
+        request,
+        IpcRequest::GetState | IpcRequest::CreateCluster { .. }
+    )
+}
+
 fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error>> {
-    with_state_owner(|owner| owner.ingest_sway_facts())?;
+    if needs_sway_ingest(&request) {
+        with_state_owner(|owner| owner.ingest_sway_facts())?;
+    }
 
     match request {
         IpcRequest::GetState => {
@@ -447,13 +495,11 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
         IpcRequest::CreateCluster { name, x, y } => {
             let mut conn = Connection::new()?;
             let escaped = name.replace('"', "\\\"");
-            for reply in conn.run_command(format!("workspace \"{escaped}\""))? {
+            let cmd = format!("workspace \"{escaped}\"; workspace back_and_forth");
+            for reply in conn.run_command(&cmd)? {
                 if let Err(e) = reply {
                     tracing::warn!(?e, "sway workspace create warning");
                 }
-            }
-            for reply in conn.run_command("workspace back_and_forth")? {
-                let _ = reply;
             }
             with_state_owner(|owner| owner.ingest_sway_facts())?;
             let result = with_state_owner(|owner| owner.set_cluster_position_by_name(&name, x, y));
@@ -461,6 +507,25 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                 Ok(()) => Ok(IpcResponse::Ack),
                 Err(msg) => Ok(IpcResponse::Error { message: msg }),
             }
+        }
+        IpcRequest::BeginClusterDrag { cluster, .. } => {
+            with_state_owner(|owner| owner.begin_cluster_drag(cluster));
+            Ok(IpcResponse::Ack)
+        }
+        IpcRequest::UpdateClusterDrag {
+            cluster_x,
+            cluster_y,
+        } => {
+            with_state_owner(|owner| owner.update_cluster_drag(cluster_x, cluster_y));
+            Ok(IpcResponse::Ack)
+        }
+        IpcRequest::CommitClusterDrag => {
+            with_state_owner(|owner| owner.commit_cluster_drag());
+            Ok(IpcResponse::Ack)
+        }
+        IpcRequest::CancelClusterDrag => {
+            with_state_owner(|owner| owner.cancel_cluster_drag());
+            Ok(IpcResponse::Ack)
         }
         unsupported => Ok(IpcResponse::Error {
             message: json!({

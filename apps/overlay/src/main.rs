@@ -64,8 +64,14 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
-    let mutation: Rc<dyn Fn(interaction::IpcMutation)> = Rc::new(|mutation| {
-        interaction::dispatch_ipc_mutation(mutation);
+    let mutation: Rc<dyn Fn(interaction::IpcMutation)> = Rc::new(|mutation| match &mutation {
+        interaction::IpcMutation::UpdateClusterDrag { .. }
+        | interaction::IpcMutation::KeyboardMoveBy { .. } => {
+            interaction::dispatch_ipc_mutation_detached(mutation);
+        }
+        _ => {
+            interaction::dispatch_ipc_mutation(mutation);
+        }
     });
 
     let overview_canvas = ui::OverviewCanvas::new(

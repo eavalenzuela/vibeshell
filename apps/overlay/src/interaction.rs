@@ -14,8 +14,8 @@ pub enum IpcMutation {
         base_revision: u64,
     },
     UpdateClusterDrag {
-        pointer_canvas_x: f64,
-        pointer_canvas_y: f64,
+        cluster_x: f64,
+        cluster_y: f64,
     },
     CommitClusterDrag,
     CancelClusterDrag,
@@ -67,13 +67,13 @@ fn build_mutation_command(mutation: &IpcMutation) -> Command {
             ]);
         }
         IpcMutation::UpdateClusterDrag {
-            pointer_canvas_x,
-            pointer_canvas_y,
+            cluster_x,
+            cluster_y,
         } => {
             command.args([
                 "update-cluster-drag",
-                &pointer_canvas_x.to_string(),
-                &pointer_canvas_y.to_string(),
+                &cluster_x.to_string(),
+                &cluster_y.to_string(),
             ]);
         }
         IpcMutation::CommitClusterDrag => {

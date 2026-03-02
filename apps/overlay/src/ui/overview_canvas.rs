@@ -41,8 +41,6 @@ enum DragMode {
     },
     DraggingCluster {
         cluster_id: ClusterId,
-        start_canvas_x: f64,
-        start_canvas_y: f64,
     },
     Panning {
         viewport_start: (f64, f64),
@@ -63,6 +61,7 @@ struct WidgetState {
     interaction: InteractionMachine,
     daemon_viewport: Viewport,
     has_local_viewport: bool,
+    last_drag_ipc: Option<std::time::Instant>,
 }
 
 impl OverviewCanvas {
@@ -104,6 +103,7 @@ impl OverviewCanvas {
             interaction: InteractionMachine::default(),
             daemon_viewport: Viewport::default(),
             has_local_viewport: false,
+            last_drag_ipc: None,
         }));
 
         area.set_draw_func({
@@ -184,7 +184,25 @@ impl OverviewCanvas {
             let on_mutation = Rc::clone(&on_mutation);
             move |_, _, _, _| {
                 let mut state = data.borrow_mut();
-                if matches!(state.drag_mode, Some(DragMode::DraggingCluster { .. })) {
+                let committing_cluster =
+                    if let Some(DragMode::DraggingCluster { cluster_id, .. }) = state.drag_mode {
+                        Some(cluster_id)
+                    } else {
+                        None
+                    };
+                if let Some(cluster_id) = committing_cluster {
+                    state.last_drag_ipc = None;
+                    if let Some(offset) = state.cluster_offsets.remove(&cluster_id) {
+                        if let Some(cluster) = state
+                            .canvas_state
+                            .clusters
+                            .iter_mut()
+                            .find(|c| c.id == cluster_id)
+                        {
+                            cluster.x += offset.0;
+                            cluster.y += offset.1;
+                        }
+                    }
                     on_mutation(IpcMutation::CommitClusterDrag);
                 }
                 if matches!(
@@ -224,36 +242,60 @@ impl OverviewCanvas {
                         state
                             .interaction
                             .on_event(InteractionEvent::DragStartCluster);
-                        state.drag_mode = Some(DragMode::DraggingCluster {
-                            cluster_id,
-                            start_canvas_x,
-                            start_canvas_y,
-                        });
+                        state.drag_mode = Some(DragMode::DraggingCluster { cluster_id });
                         on_mutation(IpcMutation::BeginClusterDrag {
                             cluster: cluster_id,
                             pointer_canvas_x: start_canvas_x,
                             pointer_canvas_y: start_canvas_y,
                             base_revision: state.canvas_state.state_revision,
                         });
-                        let pointer_canvas_x = start_canvas_x + dx;
-                        let pointer_canvas_y = start_canvas_y + dy;
+                        let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
+                        let (cluster_x, cluster_y) = state
+                            .canvas_state
+                            .clusters
+                            .iter()
+                            .find(|c| c.id == cluster_id)
+                            .map(|c| {
+                                let tx =
+                                    (c.x + dx / scale).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+                                let ty =
+                                    (c.y + dy / scale).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+                                (tx, ty)
+                            })
+                            .unwrap_or((0.0, 0.0));
+                        state.last_drag_ipc = Some(std::time::Instant::now());
                         on_mutation(IpcMutation::UpdateClusterDrag {
-                            pointer_canvas_x,
-                            pointer_canvas_y,
+                            cluster_x,
+                            cluster_y,
                         });
                         apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);
                     }
-                    DragMode::DraggingCluster {
-                        cluster_id,
-                        start_canvas_x,
-                        start_canvas_y,
-                    } => {
-                        let pointer_canvas_x = start_canvas_x + dx;
-                        let pointer_canvas_y = start_canvas_y + dy;
-                        on_mutation(IpcMutation::UpdateClusterDrag {
-                            pointer_canvas_x,
-                            pointer_canvas_y,
-                        });
+                    DragMode::DraggingCluster { cluster_id } => {
+                        let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
+                        let (cluster_x, cluster_y) = state
+                            .canvas_state
+                            .clusters
+                            .iter()
+                            .find(|c| c.id == cluster_id)
+                            .map(|c| {
+                                let tx =
+                                    (c.x + dx / scale).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+                                let ty =
+                                    (c.y + dy / scale).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+                                (tx, ty)
+                            })
+                            .unwrap_or((0.0, 0.0));
+                        let now = std::time::Instant::now();
+                        let should_send = state
+                            .last_drag_ipc
+                            .is_none_or(|t| now.duration_since(t).as_millis() >= 33);
+                        if should_send {
+                            state.last_drag_ipc = Some(now);
+                            on_mutation(IpcMutation::UpdateClusterDrag {
+                                cluster_x,
+                                cluster_y,
+                            });
+                        }
                         apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);
                     }
                     DragMode::Panning { viewport_start } => {
@@ -272,7 +314,25 @@ impl OverviewCanvas {
             let on_mutation = Rc::clone(&on_mutation);
             move |_, _, _| {
                 let mut state = data.borrow_mut();
-                if matches!(state.drag_mode, Some(DragMode::DraggingCluster { .. })) {
+                let committing_cluster =
+                    if let Some(DragMode::DraggingCluster { cluster_id, .. }) = state.drag_mode {
+                        Some(cluster_id)
+                    } else {
+                        None
+                    };
+                if let Some(cluster_id) = committing_cluster {
+                    state.last_drag_ipc = None;
+                    if let Some(offset) = state.cluster_offsets.remove(&cluster_id) {
+                        if let Some(cluster) = state
+                            .canvas_state
+                            .clusters
+                            .iter_mut()
+                            .find(|c| c.id == cluster_id)
+                        {
+                            cluster.x += offset.0;
+                            cluster.y += offset.1;
+                        }
+                    }
                     on_mutation(IpcMutation::CommitClusterDrag);
                 }
                 if let Some(DragMode::Panning { .. }) = &state.drag_mode {
@@ -554,6 +614,8 @@ impl OverviewCanvas {
                             EscapeAction::CancelDrag => {
                                 if matches!(state.drag_mode, Some(DragMode::DraggingCluster { .. }))
                                 {
+                                    state.last_drag_ipc = None;
+                                    state.cluster_offsets.clear();
                                     on_mutation(IpcMutation::CancelClusterDrag);
                                 }
                                 state.drag_mode = None;

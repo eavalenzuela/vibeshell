@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::contracts::{CanvasState, Cluster, ClusterId, Viewport, WindowId};
+use crate::contracts::{CanvasState, Cluster, ClusterId, Viewport, WindowId, ZoomLevel};
 
 const DEFAULT_DEBOUNCE_MS: u64 = 250;
 
@@ -26,6 +26,7 @@ pub struct PersistedOverviewState {
     pub output_viewports: BTreeMap<String, Viewport>,
     pub clusters: Vec<PersistedCluster>,
     pub manual_window_assignments: BTreeMap<WindowId, ClusterId>,
+    pub active_cluster: Option<ClusterId>,
 }
 
 impl PersistedOverviewState {
@@ -49,6 +50,10 @@ impl PersistedOverviewState {
                 .filter(|window| window.manual_cluster_override)
                 .filter_map(|window| window.cluster_id.map(|cluster| (window.id, cluster)))
                 .collect(),
+            active_cluster: match state.zoom {
+                ZoomLevel::Cluster(id) => Some(id),
+                _ => None,
+            },
         }
     }
 
@@ -69,6 +74,9 @@ impl PersistedOverviewState {
                 recency: Vec::new(),
             })
             .collect();
+        if let Some(cluster_id) = self.active_cluster {
+            state.zoom = ZoomLevel::Cluster(cluster_id);
+        }
     }
 
     pub fn merge_into_live_canvas(&self, state: &mut CanvasState) {
@@ -91,6 +99,12 @@ impl PersistedOverviewState {
             if let Some(cluster_id) = self.manual_window_assignments.get(&window.id).copied() {
                 window.cluster_id = Some(cluster_id);
                 window.manual_cluster_override = true;
+            }
+        }
+
+        if let Some(cluster_id) = self.active_cluster {
+            if state.zoom == ZoomLevel::Overview {
+                state.zoom = ZoomLevel::Cluster(cluster_id);
             }
         }
     }

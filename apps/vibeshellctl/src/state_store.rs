@@ -7,6 +7,7 @@ use common::contracts::{
     WindowId, WindowRole, WindowState, ZoomLevel,
 };
 use common::persistence::{OverviewPersistence, PersistedOverviewState};
+use config::schema::AssignmentHint;
 use serde::Serialize;
 use serde_json::json;
 use swayipc::Connection;
@@ -50,6 +51,9 @@ pub enum MutationType {
     OverviewPan,
     OverviewZoom,
     CreateCluster,
+    UpdateClusterDrag,
+    CommitClusterDrag,
+    CancelClusterDrag,
 }
 
 #[derive(Debug)]
@@ -60,6 +64,8 @@ pub struct StateOwner {
     persistence: OverviewPersistence,
     boot_persisted: Option<PersistedOverviewState>,
     focused_output: Option<String>,
+    assignment_hints: Vec<AssignmentHint>,
+    drag_origin: Option<(ClusterId, f64, f64)>,
 }
 
 impl StateOwner {
@@ -70,6 +76,9 @@ impl StateOwner {
         if let Some(persisted) = &boot_persisted {
             persisted.apply_to_canvas_seed(&mut canvas_state);
         }
+        let assignment_hints = config::Config::load()
+            .map(|cfg| cfg.continuum.assignment_hints)
+            .unwrap_or_default();
 
         Self {
             canvas_state,
@@ -78,6 +87,8 @@ impl StateOwner {
             persistence,
             boot_persisted,
             focused_output: None,
+            assignment_hints,
+            drag_origin: None,
         }
     }
 
@@ -215,6 +226,7 @@ impl StateOwner {
     pub fn ingest_sway_facts(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let prior = self.canvas_state.state_revision;
         let previous_state = self.canvas_state.clone();
+        let previous_zoom = self.canvas_state.zoom.clone();
         let snapshot = sway_snapshot()?;
         let mut outcome = ConflictOutcome::None;
 
@@ -245,6 +257,8 @@ impl StateOwner {
         if let Some(persisted) = &self.boot_persisted {
             persisted.merge_into_live_canvas(&mut self.canvas_state);
         }
+        self.apply_assignment_hints();
+        self.anchor_transient_dialogs();
 
         let connected_outputs = snapshot.outputs.iter().cloned().collect::<HashSet<_>>();
         self.canvas_state
@@ -317,6 +331,23 @@ impl StateOwner {
             }
         }
 
+        let keep_zoom = match &self.canvas_state.zoom {
+            ZoomLevel::Cluster(id) => self
+                .canvas_state
+                .windows
+                .iter()
+                .any(|w| w.cluster_id == Some(*id) && w.state == WindowState::Fullscreen),
+            ZoomLevel::Focus(wid) => self
+                .canvas_state
+                .windows
+                .iter()
+                .any(|w| w.id == *wid && w.state == WindowState::Fullscreen),
+            ZoomLevel::Overview => false,
+        };
+        if keep_zoom {
+            self.canvas_state.zoom = previous_zoom;
+        }
+
         self.persist_after_mutation(&previous_state);
         self.bump_revision(prior, MutationType::SwayIngest, outcome);
         Ok(())
@@ -329,6 +360,7 @@ impl StateOwner {
 
     pub fn activate_cluster(&mut self, cluster_id: ClusterId) -> Result<(), String> {
         let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
         if self
             .canvas_state
             .clusters
@@ -338,6 +370,7 @@ impl StateOwner {
             self.selected_cluster_id = Some(cluster_id);
             self.canvas_state.zoom = ZoomLevel::Cluster(cluster_id);
             self.focus_freeze = FocusFreezeMetadata::default();
+            self.persist_after_mutation(&previous_state);
             self.bump_revision(prior, MutationType::ActivateCluster, ConflictOutcome::None);
             Ok(())
         } else {
@@ -387,6 +420,7 @@ impl StateOwner {
 
     pub fn zoom_in_mode(&mut self) -> Result<(), String> {
         let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
         match self.canvas_state.zoom {
             ZoomLevel::Overview => {
                 let cluster_id = self
@@ -398,6 +432,7 @@ impl StateOwner {
                     })?;
                 self.canvas_state.zoom = ZoomLevel::Cluster(cluster_id);
                 self.selected_cluster_id = Some(cluster_id);
+                self.persist_after_mutation(&previous_state);
                 self.bump_revision(prior, MutationType::ZoomInMode, ConflictOutcome::None);
                 Ok(())
             }
@@ -419,6 +454,7 @@ impl StateOwner {
                     window_id: Some(window_id),
                     reason: Some("zoom_in_mode".into()),
                 };
+                self.persist_after_mutation(&previous_state);
                 self.bump_revision(prior, MutationType::ZoomInMode, ConflictOutcome::None);
                 Ok(())
             }
@@ -431,6 +467,7 @@ impl StateOwner {
 
     pub fn zoom_out_mode(&mut self) -> Result<(), String> {
         let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
         match self.canvas_state.zoom {
             ZoomLevel::Focus(window_id) => {
                 let cluster_id = self
@@ -447,11 +484,13 @@ impl StateOwner {
                 self.canvas_state.zoom = ZoomLevel::Cluster(cluster_id);
                 self.selected_cluster_id = Some(cluster_id);
                 self.focus_freeze = FocusFreezeMetadata::default();
+                self.persist_after_mutation(&previous_state);
                 self.bump_revision(prior, MutationType::ZoomOutMode, ConflictOutcome::None);
                 Ok(())
             }
             ZoomLevel::Cluster(_) => {
                 self.canvas_state.zoom = ZoomLevel::Overview;
+                self.persist_after_mutation(&previous_state);
                 self.bump_revision(prior, MutationType::ZoomOutMode, ConflictOutcome::None);
                 Ok(())
             }
@@ -536,14 +575,86 @@ impl StateOwner {
         }
     }
 
+    pub fn begin_cluster_drag(&mut self, cluster_id: ClusterId) {
+        self.drag_origin = self
+            .canvas_state
+            .clusters
+            .iter()
+            .find(|c| c.id == cluster_id)
+            .map(|c| (cluster_id, c.x, c.y));
+    }
+
+    pub fn update_cluster_drag(&mut self, cluster_x: f64, cluster_y: f64) {
+        let Some((cluster_id, _, _)) = self.drag_origin else {
+            return;
+        };
+        let prior = self.canvas_state.state_revision;
+        if let Some(cluster) = self
+            .canvas_state
+            .clusters
+            .iter_mut()
+            .find(|c| c.id == cluster_id)
+        {
+            cluster.x = cluster_x;
+            cluster.y = cluster_y;
+        }
+        self.bump_revision(
+            prior,
+            MutationType::UpdateClusterDrag,
+            ConflictOutcome::None,
+        );
+    }
+
+    pub fn commit_cluster_drag(&mut self) {
+        let prior = self.canvas_state.state_revision;
+        if let Err(e) = self.persistence.persist_immediate(&self.canvas_state) {
+            tracing::warn!(?e, "commit_cluster_drag: persist failed");
+        } else {
+            self.update_boot_persisted();
+        }
+        self.drag_origin = None;
+        self.bump_revision(
+            prior,
+            MutationType::CommitClusterDrag,
+            ConflictOutcome::None,
+        );
+    }
+
+    pub fn cancel_cluster_drag(&mut self) {
+        let prior = self.canvas_state.state_revision;
+        if let Some((cluster_id, origin_x, origin_y)) = self.drag_origin.take() {
+            if let Some(cluster) = self
+                .canvas_state
+                .clusters
+                .iter_mut()
+                .find(|c| c.id == cluster_id)
+            {
+                cluster.x = origin_x;
+                cluster.y = origin_y;
+            }
+        }
+        self.bump_revision(
+            prior,
+            MutationType::CancelClusterDrag,
+            ConflictOutcome::None,
+        );
+    }
+
+    fn update_boot_persisted(&mut self) {
+        self.boot_persisted = Some(PersistedOverviewState::from_canvas(&self.canvas_state));
+    }
+
     fn persist_after_mutation(&mut self, previous: &CanvasState) {
         let changed_positions = cluster_position_or_metadata_changed(previous, &self.canvas_state);
         let changed_assignments = window_assignment_changed(previous, &self.canvas_state);
         let changed_viewport = previous.viewport != self.canvas_state.viewport;
+        let changed_zoom = previous.zoom != self.canvas_state.zoom;
 
-        if changed_positions || changed_assignments {
+        if changed_positions || changed_assignments || changed_zoom {
             if let Err(error) = self.persistence.persist_immediate(&self.canvas_state) {
                 tracing::warn!(?error, path=?self.persistence.path(), "failed to persist overview state immediately");
+            } else {
+                self.update_boot_persisted();
             }
             return;
         }
@@ -569,6 +680,78 @@ impl StateOwner {
             focus_freeze = ?self.focus_freeze,
             "deterministic mutation log"
         );
+    }
+
+    fn apply_assignment_hints(&mut self) {
+        let cluster_by_name: BTreeMap<String, ClusterId> = self
+            .canvas_state
+            .clusters
+            .iter()
+            .map(|c| (c.name.to_ascii_lowercase(), c.id))
+            .collect();
+        let hints = self.assignment_hints.clone();
+        for window in &mut self.canvas_state.windows {
+            if window.manual_cluster_override || window.transient_for.is_some() {
+                continue;
+            }
+            let app_id_lower = window.app_id.as_deref().map(str::to_ascii_lowercase);
+            let class_lower = window.class.as_deref().map(str::to_ascii_lowercase);
+            let title_lower = window.title.to_ascii_lowercase();
+            for hint in &hints {
+                let has_criterion =
+                    hint.app_id.is_some() || hint.class.is_some() || hint.title_contains.is_some();
+                if !has_criterion {
+                    continue;
+                }
+                let app_match = hint.app_id.as_ref().is_none_or(|h| {
+                    app_id_lower.as_deref() == Some(h.to_ascii_lowercase().as_str())
+                });
+                let class_match = hint.class.as_ref().is_none_or(|h| {
+                    class_lower.as_deref() == Some(h.to_ascii_lowercase().as_str())
+                });
+                let title_match = hint
+                    .title_contains
+                    .as_ref()
+                    .is_none_or(|h| title_lower.contains(h.to_ascii_lowercase().as_str()));
+                if app_match && class_match && title_match {
+                    let cluster_name_lower = hint.cluster.to_ascii_lowercase();
+                    if let Some(&cluster_id) = cluster_by_name.get(&cluster_name_lower) {
+                        window.cluster_id = Some(cluster_id);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn anchor_transient_dialogs(&mut self) {
+        let window_to_cluster: BTreeMap<WindowId, ClusterId> = self
+            .canvas_state
+            .windows
+            .iter()
+            .filter_map(|w| w.cluster_id.map(|c| (w.id, c)))
+            .collect();
+        for window in &mut self.canvas_state.windows {
+            if window.manual_cluster_override {
+                continue;
+            }
+            let Some(parent_id) = window.transient_for else {
+                continue;
+            };
+            let Some(&parent_cluster) = window_to_cluster.get(&parent_id) else {
+                continue;
+            };
+            if window.cluster_id != Some(parent_cluster) {
+                tracing::debug!(
+                    window_id = window.id,
+                    parent_id,
+                    from_cluster = ?window.cluster_id,
+                    to_cluster = parent_cluster,
+                    "anchoring transient dialog to parent cluster"
+                );
+                window.cluster_id = Some(parent_cluster);
+            }
+        }
     }
 }
 
@@ -768,7 +951,7 @@ fn collect_windows_from_tree(
             cluster_id,
             transient_for,
             manual_cluster_override: false,
-            manual_position_override: has_overlay_hint,
+            manual_position_override: has_overlay_hint || node.fullscreen_mode.unwrap_or(0) > 0,
         });
     }
 
