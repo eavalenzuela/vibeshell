@@ -10,7 +10,7 @@
 - [ ] "Auto-cluster" heuristic v1: by app_id/class (optional toggle)
 - [ ] Fast recall — "Recent clusters" switcher (Alt-Tab equivalent for clusters)
 - [ ] Launcher can search windows and clusters
-- [ ] Persistence — save/restore cluster positions, window→cluster mapping, last viewport/zoom
+- [x] Persistence — save/restore cluster positions, window→cluster mapping, last viewport/zoom
 - [ ] Graceful handling when windows are missing (apps closed)
 
 ### Must-have desktop-reality features
@@ -98,39 +98,47 @@
 
 ---
 
-### [ ] Phase 4B — Overview polish *(depends on Phase 6 frame-time data)*
+### [x] Phase 4B — Overview polish
 
-- [ ] Snap-to affordances during drag/move (grid lines, card centerlines, output center)
-- [ ] Snap ghost preview within 24 px of snap target
-- [ ] Inertial panning behavior
-- [ ] Animation timing/easing tuning for overview transitions and recentering
+- [x] Snap-to affordances during drag/move (grid lines every 200 world-px, card centerlines, output center)
+- [x] Snap ghost preview: faint blue guide lines drawn when within 24 screen-px of a snap target
+- [x] Inertial panning behavior (EMA velocity + friction loop via glib::timeout_add_local)
+- [x] Animated recenter: R key eases to cluster with ease-out-cubic over 220 ms
 
-> **Note:** Complete alongside/after Phase 6 so interaction smoothness work is informed by measured frame-time/input-latency behavior.
-
----
-
-### [ ] Phase 5 — Persistence + robustness
-
-- [ ] Persist: cluster positions, window→cluster assignment hints (by app_id + title patterns)
-- [ ] Persist: last active cluster + viewport/zoom level
-- [ ] Fullscreen window handling (temporarily override zoom)
-- [ ] Dialogs transient_for parent (keep near parent, don't strip)
-- [ ] Multi-output: at least don't break; per-output viewport ideally
-
-**Exit criteria:** restart session and the workspace landscape comes back sensibly.
+**Exit criteria:**
+- [x] Drag cluster near grid/card/center → card snaps and guide line appears
+- [x] Keyboard move (M+arrows) also applies snap
+- [x] Pan and release with velocity → viewport drifts and decelerates naturally
+- [x] R key smoothly pans to selected cluster; arrow-key pan cancels animation
 
 ---
 
-### [ ] Phase 6 — Performance polish
+### [x] Phase 5 — Persistence + robustness
 
-- [ ] Reduce IPC chatter: only apply diffs above thresholds
-- [ ] Batch Sway commands (semicolon-separated per frame)
-- [ ] Avoid frequent `get_tree` — prefer event-driven state
-- [ ] Throttle cluster position writes to ≤30 Hz during drag; final unthrottled commit on release
-- [ ] Viewport pan/zoom writes ≤20 Hz during gesture + final commit
-- [ ] Optional: simple overlay animations (not moving windows smoothly yet)
+- [x] Persist: cluster positions (boot_persisted snap-back fixed via `update_boot_persisted` after every `persist_immediate`)
+- [x] Persist: window→cluster assignment hints (`AssignmentHint` config schema + `apply_assignment_hints()`)
+- [x] Persist: last active cluster + viewport/zoom level (`active_cluster` added to `PersistedOverviewState`)
+- [x] Fullscreen window handling: preserve zoom level when a fullscreen window is in focus
+- [x] Dialogs transient_for parent: `anchor_transient_dialogs()` assigns transient windows to parent cluster
+- [ ] Multi-output: at least don't break; per-output viewport ideally *(deferred)*
 
-**Exit criteria:** no "constant resizing" feeling; CPU stays sane.
+**Exit criteria:** restart session and the workspace landscape comes back sensibly. ✓
+
+---
+
+### [x] Phase 6 — Performance polish
+
+- [x] Reduce IPC chatter: `needs_sway_ingest()` predicate — only `GetState`/`CreateCluster` call `ingest_sway_facts()`
+- [x] Batch Sway commands: `CreateCluster` issues two commands in one semicolon-joined `run_command` call
+- [x] Avoid frequent `get_tree`: mutation-only IPC paths skip `get_tree`/`get_workspaces`/`get_outputs`
+- [x] Throttle cluster position writes to ≤30 Hz during drag (`last_drag_ipc` Instant guard); unthrottled commit on release
+- [x] Non-blocking IPC dispatch for `UpdateClusterDrag` and `KeyboardMoveBy` (`dispatch_ipc_mutation_detached`)
+- [x] Full drag lifecycle: `BeginClusterDrag` / `UpdateClusterDrag` / `CommitClusterDrag` / `CancelClusterDrag` wired CLI → IPC → state
+- [x] Drag offset baked into `canvas_state` on commit to prevent double-offset on next daemon poll
+- [ ] Viewport pan/zoom writes ≤20 Hz *(deferred — lower priority given pan/zoom are user-initiated, not sustained)*
+- [ ] Simple overlay animations *(deferred — explicit non-goal for v1)*
+
+**Exit criteria:** no "constant resizing" feeling; CPU stays sane. ✓
 
 ---
 

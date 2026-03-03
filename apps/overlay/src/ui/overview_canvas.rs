@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use common::contracts::{CanvasState, Cluster, ClusterId, Viewport, Window};
 use gtk::gdk;
@@ -23,6 +24,13 @@ const KEY_MOVE_STEP: f64 = 32.0;
 const KEY_MOVE_STEP_LARGE: f64 = 128.0;
 const GLOBAL_CANVAS_MIN: f64 = -10000.0;
 const GLOBAL_CANVAS_MAX: f64 = 10000.0;
+
+// Phase 4B: snap, inertia, animation
+const SNAP_GRID_PX: f64 = 200.0;
+const SNAP_THRESHOLD_SCREEN: f64 = 24.0;
+const INERTIA_FRICTION: f64 = 0.86;
+const INERTIA_MIN_PX: f64 = 0.5;
+const RECENTER_DURATION_MS: f64 = 220.0;
 
 #[derive(Clone)]
 pub struct OverviewCanvas {
@@ -52,6 +60,26 @@ enum MoveMode {
     Keyboard { _cluster_id: ClusterId },
 }
 
+/// A world-space guide line shown while a snap is active during cluster drag/move.
+struct SnapGuide {
+    /// true = vertical line (x snapped), false = horizontal (y snapped)
+    vertical: bool,
+    /// World-space coordinate of the guide line
+    coord: f64,
+}
+
+/// Smooth viewport animation (used for R-key recenter).
+struct ViewportAnim {
+    start_x: f64,
+    start_y: f64,
+    target_x: f64,
+    target_y: f64,
+    start: Instant,
+    duration_ms: f64,
+    /// Generation counter so a new animation cancels any previous timeout callback.
+    generation: u64,
+}
+
 struct WidgetState {
     canvas_state: CanvasState,
     selected_cluster: Option<ClusterId>,
@@ -62,6 +90,13 @@ struct WidgetState {
     daemon_viewport: Viewport,
     has_local_viewport: bool,
     last_drag_ipc: Option<std::time::Instant>,
+    // Phase 4B
+    snap_guides: Vec<SnapGuide>,
+    pan_velocity: (f64, f64), // screen px per drag event (EMA-smoothed)
+    prev_drag_dx: f64,        // previous cumulative drag dx (for velocity diff)
+    prev_drag_dy: f64,
+    viewport_anim: Option<ViewportAnim>,
+    inertia_active: bool,
 }
 
 impl OverviewCanvas {
@@ -104,6 +139,12 @@ impl OverviewCanvas {
             daemon_viewport: Viewport::default(),
             has_local_viewport: false,
             last_drag_ipc: None,
+            snap_guides: Vec::new(),
+            pan_velocity: (0.0, 0.0),
+            prev_drag_dx: 0.0,
+            prev_drag_dy: 0.0,
+            viewport_anim: None,
+            inertia_active: false,
         }));
 
         area.set_draw_func({
@@ -153,6 +194,7 @@ impl OverviewCanvas {
                                 state.canvas_state.viewport.y,
                             ),
                         });
+                        reset_pan_tracking(&mut state);
                     } else {
                         state.drag_mode = Some(DragMode::PendingCluster {
                             cluster_id,
@@ -172,6 +214,7 @@ impl OverviewCanvas {
                             state.canvas_state.viewport.y,
                         ),
                     });
+                    reset_pan_tracking(&mut state);
                 }
 
                 update_status(&state, &status_label);
@@ -192,6 +235,7 @@ impl OverviewCanvas {
                     };
                 if let Some(cluster_id) = committing_cluster {
                     state.last_drag_ipc = None;
+                    state.snap_guides.clear();
                     if let Some(offset) = state.cluster_offsets.remove(&cluster_id) {
                         if let Some(cluster) = state
                             .canvas_state
@@ -249,42 +293,17 @@ impl OverviewCanvas {
                             pointer_canvas_y: start_canvas_y,
                             base_revision: state.canvas_state.state_revision,
                         });
-                        let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
-                        let (cluster_x, cluster_y) = state
-                            .canvas_state
-                            .clusters
-                            .iter()
-                            .find(|c| c.id == cluster_id)
-                            .map(|c| {
-                                let tx =
-                                    (c.x + dx / scale).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-                                let ty =
-                                    (c.y + dy / scale).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-                                (tx, ty)
-                            })
-                            .unwrap_or((0.0, 0.0));
+                        let (cluster_x, cluster_y) =
+                            apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);
                         state.last_drag_ipc = Some(std::time::Instant::now());
                         on_mutation(IpcMutation::UpdateClusterDrag {
                             cluster_x,
                             cluster_y,
                         });
-                        apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);
                     }
                     DragMode::DraggingCluster { cluster_id } => {
-                        let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
-                        let (cluster_x, cluster_y) = state
-                            .canvas_state
-                            .clusters
-                            .iter()
-                            .find(|c| c.id == cluster_id)
-                            .map(|c| {
-                                let tx =
-                                    (c.x + dx / scale).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-                                let ty =
-                                    (c.y + dy / scale).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-                                (tx, ty)
-                            })
-                            .unwrap_or((0.0, 0.0));
+                        let (cluster_x, cluster_y) =
+                            apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);
                         let now = std::time::Instant::now();
                         let should_send = state
                             .last_drag_ipc
@@ -296,10 +315,18 @@ impl OverviewCanvas {
                                 cluster_y,
                             });
                         }
-                        apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);
                     }
                     DragMode::Panning { viewport_start } => {
                         let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
+
+                        // Track pan velocity for inertia (EMA of screen-px delta per event)
+                        let delta_x = dx - state.prev_drag_dx;
+                        let delta_y = dy - state.prev_drag_dy;
+                        state.pan_velocity.0 = state.pan_velocity.0 * 0.5 + delta_x * 0.5;
+                        state.pan_velocity.1 = state.pan_velocity.1 * 0.5 + delta_y * 0.5;
+                        state.prev_drag_dx = dx;
+                        state.prev_drag_dy = dy;
+
                         state.canvas_state.viewport.x = viewport_start.0 - (dx / scale);
                         state.canvas_state.viewport.y = viewport_start.1 - (dy / scale);
                         area.queue_draw();
@@ -311,43 +338,63 @@ impl OverviewCanvas {
         });
         drag.connect_drag_end({
             let data = Rc::clone(&data);
+            let area = area.clone();
             let on_mutation = Rc::clone(&on_mutation);
             move |_, _, _| {
-                let mut state = data.borrow_mut();
-                let committing_cluster =
-                    if let Some(DragMode::DraggingCluster { cluster_id, .. }) = state.drag_mode {
-                        Some(cluster_id)
-                    } else {
-                        None
-                    };
-                if let Some(cluster_id) = committing_cluster {
-                    state.last_drag_ipc = None;
-                    if let Some(offset) = state.cluster_offsets.remove(&cluster_id) {
-                        if let Some(cluster) = state
-                            .canvas_state
-                            .clusters
-                            .iter_mut()
-                            .find(|c| c.id == cluster_id)
+                let start_inertia_now = {
+                    let mut state = data.borrow_mut();
+                    let committing_cluster =
+                        if let Some(DragMode::DraggingCluster { cluster_id, .. }) = state.drag_mode
                         {
-                            cluster.x += offset.0;
-                            cluster.y += offset.1;
+                            Some(cluster_id)
+                        } else {
+                            None
+                        };
+                    if let Some(cluster_id) = committing_cluster {
+                        state.last_drag_ipc = None;
+                        state.snap_guides.clear();
+                        if let Some(offset) = state.cluster_offsets.remove(&cluster_id) {
+                            if let Some(cluster) = state
+                                .canvas_state
+                                .clusters
+                                .iter_mut()
+                                .find(|c| c.id == cluster_id)
+                            {
+                                cluster.x += offset.0;
+                                cluster.y += offset.1;
+                            }
+                        }
+                        on_mutation(IpcMutation::CommitClusterDrag);
+                    }
+
+                    let mut launch = false;
+                    if let Some(DragMode::Panning { .. }) = &state.drag_mode {
+                        let dx = state.canvas_state.viewport.x - state.daemon_viewport.x;
+                        let dy = state.canvas_state.viewport.y - state.daemon_viewport.y;
+                        if dx.abs() > 0.5 || dy.abs() > 0.5 {
+                            dispatch_ipc_mutation_detached(IpcMutation::OverviewPan { dx, dy });
+                            state.daemon_viewport = state.canvas_state.viewport.clone();
+                            state.has_local_viewport = true;
+                        }
+
+                        let (vx, vy) = state.pan_velocity;
+                        let speed = (vx * vx + vy * vy).sqrt();
+                        state.prev_drag_dx = 0.0;
+                        state.prev_drag_dy = 0.0;
+                        if speed > INERTIA_MIN_PX && !state.inertia_active {
+                            state.inertia_active = true;
+                            launch = true;
                         }
                     }
-                    on_mutation(IpcMutation::CommitClusterDrag);
-                }
-                if let Some(DragMode::Panning { .. }) = &state.drag_mode {
-                    let dx = state.canvas_state.viewport.x - state.daemon_viewport.x;
-                    let dy = state.canvas_state.viewport.y - state.daemon_viewport.y;
-                    if dx.abs() > 0.5 || dy.abs() > 0.5 {
-                        dispatch_ipc_mutation_detached(IpcMutation::OverviewPan { dx, dy });
-                        state.daemon_viewport = state.canvas_state.viewport.clone();
-                        state.has_local_viewport = true;
+                    if state.drag_mode.is_some() {
+                        state.interaction.on_event(InteractionEvent::DragRelease);
                     }
+                    state.drag_mode = None;
+                    launch
+                };
+                if start_inertia_now {
+                    start_inertia(&area, Rc::clone(&data));
                 }
-                if state.drag_mode.is_some() {
-                    state.interaction.on_event(InteractionEvent::DragRelease);
-                }
-                state.drag_mode = None;
             }
         });
         area.add_controller(drag);
@@ -411,23 +458,38 @@ impl OverviewCanvas {
                             };
                             if let Some(cluster_id) = state.selected_cluster {
                                 on_mutation(IpcMutation::KeyboardMoveBy { dx, dy });
-                                if let Some((cluster_x, cluster_y)) = state
+                                // Compute new position with snap applied
+                                let base_pos = state
                                     .canvas_state
                                     .clusters
                                     .iter()
                                     .find(|c| c.id == cluster_id)
-                                    .map(|cluster| (cluster.x, cluster.y))
-                                {
+                                    .map(|c| (c.x, c.y));
+                                if let Some((cluster_x, cluster_y)) = base_pos {
+                                    let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
+                                    let cur = state
+                                        .cluster_offsets
+                                        .get(&cluster_id)
+                                        .copied()
+                                        .unwrap_or((0.0, 0.0));
+                                    let raw_x = (cluster_x + cur.0 + dx)
+                                        .clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+                                    let raw_y = (cluster_y + cur.1 + dy)
+                                        .clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+                                    let (snap_x, snap_y, guides) = compute_snap(
+                                        raw_x,
+                                        raw_y,
+                                        cluster_id,
+                                        scale,
+                                        &state.canvas_state.clusters,
+                                    );
                                     let entry = state
                                         .cluster_offsets
                                         .entry(cluster_id)
                                         .or_insert((0.0, 0.0));
-                                    let target_x = (cluster_x + entry.0 + dx)
-                                        .clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-                                    let target_y = (cluster_y + entry.1 + dy)
-                                        .clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-                                    entry.0 = target_x - cluster_x;
-                                    entry.1 = target_y - cluster_y;
+                                    entry.0 = snap_x - cluster_x;
+                                    entry.1 = snap_y - cluster_y;
+                                    state.snap_guides = guides;
                                 }
                             }
                             update_status(&state, &status_label);
@@ -438,6 +500,7 @@ impl OverviewCanvas {
                             on_mutation(IpcMutation::CommitKeyboardMove);
                             state.move_mode = None;
                             state.cluster_offsets.clear();
+                            state.snap_guides.clear();
                             update_status(&state, &status_label);
                             area.queue_draw();
                             return glib::Propagation::Stop;
@@ -446,6 +509,7 @@ impl OverviewCanvas {
                             on_mutation(IpcMutation::CancelKeyboardMove);
                             state.move_mode = None;
                             state.cluster_offsets.clear();
+                            state.snap_guides.clear();
                             update_status(&state, &status_label);
                             area.queue_draw();
                             return glib::Propagation::Stop;
@@ -521,6 +585,7 @@ impl OverviewCanvas {
                         let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
                         let delta = step / scale;
                         state.canvas_state.viewport.y -= delta;
+                        state.viewport_anim = None; // cancel recenter animation
                         dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
                             dx: 0.0,
                             dy: -delta,
@@ -539,6 +604,7 @@ impl OverviewCanvas {
                         let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
                         let delta = step / scale;
                         state.canvas_state.viewport.y += delta;
+                        state.viewport_anim = None;
                         dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
                             dx: 0.0,
                             dy: delta,
@@ -557,6 +623,7 @@ impl OverviewCanvas {
                         let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
                         let delta = step / scale;
                         state.canvas_state.viewport.x -= delta;
+                        state.viewport_anim = None;
                         dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
                             dx: -delta,
                             dy: 0.0,
@@ -575,6 +642,7 @@ impl OverviewCanvas {
                         let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
                         let delta = step / scale;
                         state.canvas_state.viewport.x += delta;
+                        state.viewport_anim = None;
                         dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
                             dx: delta,
                             dy: 0.0,
@@ -592,9 +660,12 @@ impl OverviewCanvas {
                         glib::Propagation::Stop
                     }
                     gdk::Key::r | gdk::Key::R => {
-                        recenter_selected_cluster(&mut state);
-                        update_status(&state, &status_label);
-                        area.queue_draw();
+                        let target = compute_recenter_target(&state);
+                        drop(state); // release borrow before start_recenter_anim borrows data
+                        if let Some((tx, ty)) = target {
+                            start_recenter_anim(&area, Rc::clone(&data), tx, ty);
+                        }
+                        update_status(&data.borrow(), &status_label);
                         glib::Propagation::Stop
                     }
                     gdk::Key::Return => {
@@ -616,6 +687,7 @@ impl OverviewCanvas {
                                 {
                                     state.last_drag_ipc = None;
                                     state.cluster_offsets.clear();
+                                    state.snap_guides.clear();
                                     on_mutation(IpcMutation::CancelClusterDrag);
                                 }
                                 state.drag_mode = None;
@@ -706,35 +778,63 @@ fn height(area: &gtk::DrawingArea) -> f64 {
     f64::from(area.allocated_height())
 }
 
+/// Reset pan velocity/inertia tracking when a new pan gesture begins.
+fn reset_pan_tracking(state: &mut WidgetState) {
+    state.pan_velocity = (0.0, 0.0);
+    state.prev_drag_dx = 0.0;
+    state.prev_drag_dy = 0.0;
+    state.inertia_active = false; // kill any running inertia callback
+    state.viewport_anim = None; // cancel recenter animation
+}
+
+/// Apply a pointer drag delta to the given cluster, computing snap and updating offsets.
+/// Returns the snapped world position (sent to the daemon via IPC).
 fn apply_cluster_drag(
     state: &mut WidgetState,
     area: &gtk::DrawingArea,
     cluster_id: ClusterId,
     dx: f64,
     dy: f64,
-) {
-    let viewport = &state.canvas_state.viewport;
-    let scale = viewport.scale.max(MIN_SCALE);
+) -> (f64, f64) {
+    let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
     let world_dx = dx / scale;
     let world_dy = dy / scale;
+
+    // Extract base position first (immutable borrow ends when map() returns)
+    let base = state
+        .canvas_state
+        .clusters
+        .iter()
+        .find(|c| c.id == cluster_id)
+        .map(|c| (c.x, c.y));
+
+    let Some((base_x, base_y)) = base else {
+        area.queue_draw();
+        return (0.0, 0.0);
+    };
+
+    let raw_x = (base_x + world_dx).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+    let raw_y = (base_y + world_dy).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
+
+    // Snap borrows clusters immutably (base_x/base_y already extracted)
+    let (snap_x, snap_y, guides) = compute_snap(
+        raw_x,
+        raw_y,
+        cluster_id,
+        scale,
+        &state.canvas_state.clusters,
+    );
 
     let entry = state
         .cluster_offsets
         .entry(cluster_id)
         .or_insert((0.0, 0.0));
-    if let Some(cluster) = state
-        .canvas_state
-        .clusters
-        .iter()
-        .find(|c| c.id == cluster_id)
-    {
-        let target_x = (cluster.x + world_dx).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-        let target_y = (cluster.y + world_dy).clamp(GLOBAL_CANVAS_MIN, GLOBAL_CANVAS_MAX);
-        entry.0 = target_x - cluster.x;
-        entry.1 = target_y - cluster.y;
-    }
+    entry.0 = snap_x - base_x;
+    entry.1 = snap_y - base_y;
+    state.snap_guides = guides;
 
     area.queue_draw();
+    (snap_x, snap_y)
 }
 
 fn update_status(state: &WidgetState, label: &gtk::Label) {
@@ -836,30 +936,34 @@ fn selected_cluster_offscreen(state: &WidgetState, width: f64, height: f64) -> b
     right < 0.0 || left > width || bottom < 0.0 || top > height
 }
 
-fn recenter_selected_cluster(state: &mut WidgetState) {
-    let Some(cluster_id) = state.selected_cluster else {
-        return;
-    };
-    let Some(cluster) = state
+/// Compute the world-space target for the R-key recenter, returning None if no cluster selected.
+fn compute_recenter_target(state: &WidgetState) -> Option<(f64, f64)> {
+    let cluster_id = state.selected_cluster?;
+    let cluster = state
         .canvas_state
         .clusters
         .iter()
-        .find(|c| c.id == cluster_id)
-    else {
-        return;
-    };
+        .find(|c| c.id == cluster_id)?;
     let offset = state
         .cluster_offsets
         .get(&cluster_id)
         .copied()
         .unwrap_or((0.0, 0.0));
-    state.canvas_state.viewport.x = cluster.x + offset.0;
-    state.canvas_state.viewport.y = cluster.y + offset.1;
+    Some((cluster.x + offset.0, cluster.y + offset.1))
 }
 
 fn draw_canvas(state: &WidgetState, cr: &gtk::cairo::Context, width: f64, height: f64) {
     cr.set_source_rgb(0.09, 0.10, 0.12);
     let _ = cr.paint();
+
+    // Draw snap guide lines before cards so they appear in the background
+    draw_snap_guides(
+        cr,
+        &state.snap_guides,
+        &state.canvas_state.viewport,
+        width,
+        height,
+    );
 
     let windows_by_id: HashMap<_, _> = state
         .canvas_state
@@ -935,6 +1039,34 @@ fn draw_cluster_card(
     }
 }
 
+/// Draw faint guide lines across the viewport for each active snap constraint.
+fn draw_snap_guides(
+    cr: &gtk::cairo::Context,
+    guides: &[SnapGuide],
+    viewport: &Viewport,
+    width: f64,
+    height: f64,
+) {
+    if guides.is_empty() {
+        return;
+    }
+    cr.set_source_rgba(0.45, 0.72, 1.0, 0.30);
+    cr.set_line_width(1.0);
+    let scale = viewport.scale.max(MIN_SCALE);
+    for guide in guides {
+        if guide.vertical {
+            let sx = (guide.coord - viewport.x) * scale + width / 2.0;
+            cr.move_to(sx, 0.0);
+            cr.line_to(sx, height);
+        } else {
+            let sy = (guide.coord - viewport.y) * scale + height / 2.0;
+            cr.move_to(0.0, sy);
+            cr.line_to(width, sy);
+        }
+        let _ = cr.stroke();
+    }
+}
+
 fn project_cluster(state: &WidgetState, width: f64, height: f64, cluster: &Cluster) -> (f64, f64) {
     let viewport = &state.canvas_state.viewport;
     let scale = viewport.scale.max(MIN_SCALE);
@@ -962,4 +1094,177 @@ fn hit_test(state: &WidgetState, width: f64, height: f64, x: f64, y: f64) -> Opt
         }
     }
     None
+}
+
+/// Compute the nearest snap position for a cluster being dragged to (raw_x, raw_y).
+///
+/// Snap targets (checked independently per axis):
+/// - Grid lines every SNAP_GRID_PX world units
+/// - Output center (0, 0)
+/// - Other cluster center positions
+///
+/// A guide line is emitted for each axis that snapped.
+fn compute_snap(
+    raw_x: f64,
+    raw_y: f64,
+    dragging_id: ClusterId,
+    scale: f64,
+    clusters: &[Cluster],
+) -> (f64, f64, Vec<SnapGuide>) {
+    let threshold = SNAP_THRESHOLD_SCREEN / scale.max(MIN_SCALE);
+
+    // Collect candidates for each axis
+    let mut x_cands = vec![
+        0.0_f64,                                       // output center
+        (raw_x / SNAP_GRID_PX).round() * SNAP_GRID_PX, // nearest grid line
+    ];
+    let mut y_cands = vec![0.0_f64, (raw_y / SNAP_GRID_PX).round() * SNAP_GRID_PX];
+    for c in clusters {
+        if c.id != dragging_id {
+            x_cands.push(c.x);
+            y_cands.push(c.y);
+        }
+    }
+
+    let nearest_within = |raw: f64, cands: &[f64]| -> f64 {
+        cands
+            .iter()
+            .copied()
+            .filter(|&c| (raw - c).abs() <= threshold)
+            .min_by(|&a, &b| {
+                (raw - a)
+                    .abs()
+                    .partial_cmp(&(raw - b).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(raw)
+    };
+
+    let snap_x = nearest_within(raw_x, &x_cands);
+    let snap_y = nearest_within(raw_y, &y_cands);
+
+    let mut guides = Vec::new();
+    if (snap_x - raw_x).abs() > 1e-6 {
+        guides.push(SnapGuide {
+            vertical: true,
+            coord: snap_x,
+        });
+    }
+    if (snap_y - raw_y).abs() > 1e-6 {
+        guides.push(SnapGuide {
+            vertical: false,
+            coord: snap_y,
+        });
+    }
+
+    (snap_x, snap_y, guides)
+}
+
+fn ease_out_cubic(t: f64) -> f64 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Start a smooth animated pan to (target_x, target_y) in world space.
+/// Any previous animation is superseded via a generation counter.
+fn start_recenter_anim(
+    area: &gtk::DrawingArea,
+    data: Rc<RefCell<WidgetState>>,
+    target_x: f64,
+    target_y: f64,
+) {
+    let generation = {
+        let mut state = data.borrow_mut();
+        let gen = state.viewport_anim.as_ref().map_or(1, |a| a.generation + 1);
+        state.viewport_anim = Some(ViewportAnim {
+            start_x: state.canvas_state.viewport.x,
+            start_y: state.canvas_state.viewport.y,
+            target_x,
+            target_y,
+            start: Instant::now(),
+            duration_ms: RECENTER_DURATION_MS,
+            generation: gen,
+        });
+        state.has_local_viewport = true;
+        gen
+    };
+
+    let area = area.clone();
+    glib::timeout_add_local(Duration::from_millis(16), move || {
+        // Read animation params without holding mutable borrow
+        let tick = {
+            let state = data.borrow();
+            if state.viewport_anim.as_ref().map(|a| a.generation) != Some(generation) {
+                return glib::ControlFlow::Break;
+            }
+            let anim = state.viewport_anim.as_ref().unwrap();
+            let elapsed_ms = anim.start.elapsed().as_secs_f64() * 1000.0;
+            let t = (elapsed_ms / anim.duration_ms).min(1.0);
+            let te = ease_out_cubic(t);
+            (
+                anim.start_x + (anim.target_x - anim.start_x) * te,
+                anim.start_y + (anim.target_y - anim.start_y) * te,
+                t >= 1.0,
+            )
+        };
+        let (new_x, new_y, done) = tick;
+
+        let mut state = data.borrow_mut();
+        state.canvas_state.viewport.x = new_x;
+        state.canvas_state.viewport.y = new_y;
+        area.queue_draw();
+
+        if done {
+            state.viewport_anim = None;
+            let dx = new_x - state.daemon_viewport.x;
+            let dy = new_y - state.daemon_viewport.y;
+            if dx.abs() > 0.5 || dy.abs() > 0.5 {
+                dispatch_ipc_mutation_detached(IpcMutation::OverviewPan { dx, dy });
+                state.daemon_viewport.x = new_x;
+                state.daemon_viewport.y = new_y;
+            }
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Launch the inertial panning loop after a pan gesture ends.
+/// Uses `inertia_active` as a guard; the loop stops when velocity drops below threshold.
+fn start_inertia(area: &gtk::DrawingArea, data: Rc<RefCell<WidgetState>>) {
+    let area = area.clone();
+    glib::timeout_add_local(Duration::from_millis(16), move || {
+        let mut state = data.borrow_mut();
+
+        if !state.inertia_active {
+            return glib::ControlFlow::Break;
+        }
+
+        let (vx, vy) = state.pan_velocity;
+        let speed = (vx * vx + vy * vy).sqrt();
+
+        if speed < INERTIA_MIN_PX {
+            state.pan_velocity = (0.0, 0.0);
+            state.inertia_active = false;
+            let vp_x = state.canvas_state.viewport.x;
+            let vp_y = state.canvas_state.viewport.y;
+            let dx = vp_x - state.daemon_viewport.x;
+            let dy = vp_y - state.daemon_viewport.y;
+            if dx.abs() > 0.5 || dy.abs() > 0.5 {
+                dispatch_ipc_mutation_detached(IpcMutation::OverviewPan { dx, dy });
+                state.daemon_viewport.x = vp_x;
+                state.daemon_viewport.y = vp_y;
+            }
+            area.queue_draw();
+            return glib::ControlFlow::Break;
+        }
+
+        let scale = state.canvas_state.viewport.scale.max(MIN_SCALE);
+        // Inertia continues panning in the direction of the last gesture
+        state.canvas_state.viewport.x -= vx / scale;
+        state.canvas_state.viewport.y -= vy / scale;
+        state.pan_velocity = (vx * INERTIA_FRICTION, vy * INERTIA_FRICTION);
+        state.has_local_viewport = true;
+        area.queue_draw();
+        glib::ControlFlow::Continue
+    });
 }
