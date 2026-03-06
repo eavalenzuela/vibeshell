@@ -44,6 +44,7 @@ pub enum MutationType {
     SwayIngest,
     GetState,
     ActivateCluster,
+    SelectCluster,
     SetFocusZoomTarget,
     ZoomInMode,
     ZoomOutMode,
@@ -54,6 +55,10 @@ pub enum MutationType {
     UpdateClusterDrag,
     CommitClusterDrag,
     CancelClusterDrag,
+    EnterKeyboardMoveMode,
+    KeyboardMoveBy,
+    CommitKeyboardMove,
+    CancelKeyboardMove,
 }
 
 #[derive(Debug)]
@@ -66,6 +71,7 @@ pub struct StateOwner {
     focused_output: Option<String>,
     assignment_hints: Vec<AssignmentHint>,
     drag_origin: Option<(ClusterId, f64, f64)>,
+    keyboard_move_origin: Option<(ClusterId, f64, f64)>,
 }
 
 impl StateOwner {
@@ -89,6 +95,7 @@ impl StateOwner {
             focused_output: None,
             assignment_hints,
             drag_origin: None,
+            keyboard_move_origin: None,
         }
     }
 
@@ -636,6 +643,97 @@ impl StateOwner {
         self.bump_revision(
             prior,
             MutationType::CancelClusterDrag,
+            ConflictOutcome::None,
+        );
+    }
+
+    pub fn select_cluster(&mut self, cluster_id: ClusterId) -> Result<(), String> {
+        let prior = self.canvas_state.state_revision;
+        if self
+            .canvas_state
+            .clusters
+            .iter()
+            .any(|c| c.id == cluster_id)
+        {
+            self.selected_cluster_id = Some(cluster_id);
+            self.bump_revision(prior, MutationType::SelectCluster, ConflictOutcome::None);
+            Ok(())
+        } else {
+            self.bump_revision(
+                prior,
+                MutationType::SelectCluster,
+                ConflictOutcome::MissingCluster,
+            );
+            Err(
+                json!({"error":"invalid_state","reason":"cluster_not_found","cluster":cluster_id})
+                    .to_string(),
+            )
+        }
+    }
+
+    pub fn enter_keyboard_move_mode(&mut self, cluster_id: ClusterId) {
+        self.keyboard_move_origin = self
+            .canvas_state
+            .clusters
+            .iter()
+            .find(|c| c.id == cluster_id)
+            .map(|c| (cluster_id, c.x, c.y));
+        let prior = self.canvas_state.state_revision;
+        self.bump_revision(
+            prior,
+            MutationType::EnterKeyboardMoveMode,
+            ConflictOutcome::None,
+        );
+    }
+
+    pub fn keyboard_move_by(&mut self, dx: f64, dy: f64) {
+        let Some((cluster_id, _, _)) = self.keyboard_move_origin else {
+            return;
+        };
+        let prior = self.canvas_state.state_revision;
+        if let Some(cluster) = self
+            .canvas_state
+            .clusters
+            .iter_mut()
+            .find(|c| c.id == cluster_id)
+        {
+            cluster.x += dx;
+            cluster.y += dy;
+        }
+        self.bump_revision(prior, MutationType::KeyboardMoveBy, ConflictOutcome::None);
+    }
+
+    pub fn commit_keyboard_move(&mut self) {
+        let prior = self.canvas_state.state_revision;
+        if let Err(e) = self.persistence.persist_immediate(&self.canvas_state) {
+            tracing::warn!(?e, "commit_keyboard_move: persist failed");
+        } else {
+            self.update_boot_persisted();
+        }
+        self.keyboard_move_origin = None;
+        self.bump_revision(
+            prior,
+            MutationType::CommitKeyboardMove,
+            ConflictOutcome::None,
+        );
+    }
+
+    pub fn cancel_keyboard_move(&mut self) {
+        let prior = self.canvas_state.state_revision;
+        if let Some((cluster_id, origin_x, origin_y)) = self.keyboard_move_origin.take() {
+            if let Some(cluster) = self
+                .canvas_state
+                .clusters
+                .iter_mut()
+                .find(|c| c.id == cluster_id)
+            {
+                cluster.x = origin_x;
+                cluster.y = origin_y;
+            }
+        }
+        self.bump_revision(
+            prior,
+            MutationType::CancelKeyboardMove,
             ConflictOutcome::None,
         );
     }

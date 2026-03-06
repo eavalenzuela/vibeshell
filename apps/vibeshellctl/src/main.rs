@@ -101,6 +101,16 @@ enum IpcCommands {
     CommitClusterDrag,
     /// Cancel the cluster drag, reverting to the original position.
     CancelClusterDrag,
+    /// Select a cluster in the overview without changing zoom level.
+    SelectCluster { cluster_id: ClusterId },
+    /// Begin keyboard move mode for the given cluster.
+    EnterKeyboardMoveMode { cluster_id: ClusterId },
+    /// Move the keyboard-moved cluster by (dx, dy) world units.
+    KeyboardMoveBy { dx: f64, dy: f64 },
+    /// Commit the keyboard move, persisting the new position.
+    CommitKeyboardMove,
+    /// Cancel the keyboard move, reverting to the original position.
+    CancelKeyboardMove,
 }
 
 static FOCUS_HANDOFF: OnceLock<Mutex<FocusHandoffController>> = OnceLock::new();
@@ -285,6 +295,21 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
         ),
         IpcCommands::CommitClusterDrag => (IpcRequest::CommitClusterDrag, false),
         IpcCommands::CancelClusterDrag => (IpcRequest::CancelClusterDrag, false),
+        IpcCommands::SelectCluster { cluster_id } => (
+            IpcRequest::SelectCluster {
+                cluster: cluster_id,
+            },
+            false,
+        ),
+        IpcCommands::EnterKeyboardMoveMode { cluster_id } => (
+            IpcRequest::EnterKeyboardMoveMode {
+                cluster: cluster_id,
+            },
+            false,
+        ),
+        IpcCommands::KeyboardMoveBy { dx, dy } => (IpcRequest::KeyboardMoveBy { dx, dy }, false),
+        IpcCommands::CommitKeyboardMove => (IpcRequest::CommitKeyboardMove, false),
+        IpcCommands::CancelKeyboardMove => (IpcRequest::CancelKeyboardMove, false),
     };
 
     let response = dispatch_ipc_request(request)?;
@@ -525,6 +550,29 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
         }
         IpcRequest::CancelClusterDrag => {
             with_state_owner(|owner| owner.cancel_cluster_drag());
+            Ok(IpcResponse::Ack)
+        }
+        IpcRequest::SelectCluster { cluster } => {
+            let result = with_state_owner(|owner| owner.select_cluster(cluster));
+            match result {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(message) => Ok(IpcResponse::Error { message }),
+            }
+        }
+        IpcRequest::EnterKeyboardMoveMode { cluster } => {
+            with_state_owner(|owner| owner.enter_keyboard_move_mode(cluster));
+            Ok(IpcResponse::Ack)
+        }
+        IpcRequest::KeyboardMoveBy { dx, dy } => {
+            with_state_owner(|owner| owner.keyboard_move_by(dx, dy));
+            Ok(IpcResponse::Ack)
+        }
+        IpcRequest::CommitKeyboardMove => {
+            with_state_owner(|owner| owner.commit_keyboard_move());
+            Ok(IpcResponse::Ack)
+        }
+        IpcRequest::CancelKeyboardMove => {
+            with_state_owner(|owner| owner.cancel_keyboard_move());
             Ok(IpcResponse::Ack)
         }
         unsupported => Ok(IpcResponse::Error {
