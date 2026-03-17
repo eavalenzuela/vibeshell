@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use adw::gtk::glib;
 use adw::prelude::*;
-use common::contracts::{CanvasState, ClusterId, IpcResponse};
+use common::contracts::{CanvasState, ClusterId, IpcRequest, IpcResponse};
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 
 mod interaction;
@@ -136,6 +136,15 @@ fn build_ui(app: &adw::Application) {
 }
 
 fn fetch_state_via_ipc() -> Option<CanvasState> {
+    // Try daemon socket first.
+    if let Some(response) = interaction::try_dispatch_via_socket(&IpcRequest::GetState) {
+        return match response {
+            IpcResponse::State(state) => Some(state),
+            _ => None,
+        };
+    }
+
+    // Fall back to subprocess.
     let output = Command::new("vibeshellctl")
         .args(["ipc", "get-state"])
         .output()

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -238,6 +239,11 @@ pub enum IpcResponse {
     Error {
         message: String,
     },
+}
+
+pub fn daemon_socket_path() -> PathBuf {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned());
+    PathBuf::from(runtime_dir).join("vibeshell-daemon.sock")
 }
 
 #[cfg(test)]

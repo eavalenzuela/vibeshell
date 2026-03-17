@@ -7,6 +7,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SWAY_CONFIG="${VIBESHELL_SWAY_CONFIG:-${PROJECT_ROOT}/dev/sway.config}"
 SWAY_ONLY="${VIBESHELL_SWAY_ONLY:-0}"
 
+DAEMON_CMD="${VIBESHELL_DAEMON_CMD:-cargo run -p vibeshellctl -- daemon}"
 PANEL_CMD="${VIBESHELL_PANEL_CMD:-cargo run -p panel}"
 LAUNCHER_CMD="${VIBESHELL_LAUNCHER_CMD:-cargo run -p launcher}"
 NOTIFD_CMD="${VIBESHELL_NOTIFD_CMD:-cargo run -p notifd}"
@@ -256,6 +257,8 @@ fi
 log INFO "Detected nested WAYLAND_DISPLAY=${WAYLAND_DISPLAY}"
 
 if [[ "${SWAY_ONLY}" != "1" ]]; then
+  start_component "daemon" "${DAEMON_CMD}" 0
+  sleep 0.5  # Allow daemon socket to become available before other components
   start_component "panel" "${PANEL_CMD}" 0
   start_component "launcher" "${LAUNCHER_CMD}" 0
   start_component "notifd" "${NOTIFD_CMD}" 0

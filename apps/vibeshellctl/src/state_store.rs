@@ -74,6 +74,7 @@ pub struct StateOwner {
     auto_cluster: bool,
     cluster_history: Vec<ClusterId>,
     last_applied_geometry: BTreeMap<WindowId, (i32, i32)>,
+    layout_engine_active: bool,
     drag_origin: Option<(ClusterId, f64, f64)>,
     keyboard_move_origin: Option<(ClusterId, f64, f64)>,
 }
@@ -105,6 +106,7 @@ impl StateOwner {
             auto_cluster,
             cluster_history,
             last_applied_geometry: BTreeMap::new(),
+            layout_engine_active: false,
             drag_origin: None,
             keyboard_move_origin: None,
         }
@@ -269,22 +271,29 @@ impl StateOwner {
         self.canvas_state.clusters = clusters;
 
         // Mark manually resized windows: if a tiled window's geometry diverged
-        // from the last known geometry by >10px, flag it as manual_position_override.
+        // from the intended geometry by >10px, flag it as manual_position_override.
+        //
+        // When layout_engine_active is true, last_applied_geometry holds the layout
+        // engine's computed targets — comparing against them detects user manual
+        // resizes (not just inter-poll drift). When false (legacy CLI mode), we
+        // compare consecutive sway snapshots.
         let mut windows = snapshot.windows;
         if !self.last_applied_geometry.is_empty() {
             for window in &mut windows {
                 if window.manual_position_override || window.state != WindowState::Tiled {
                     continue;
                 }
-                if let Some(&(prev_w, prev_h)) = self.last_applied_geometry.get(&window.id) {
+                if let Some(&(intended_w, intended_h)) = self.last_applied_geometry.get(&window.id)
+                {
                     if let Some(&(cur_w, cur_h)) = snapshot.window_geometry.get(&window.id) {
-                        if (cur_w - prev_w).abs() > 10 || (cur_h - prev_h).abs() > 10 {
+                        if (cur_w - intended_w).abs() > 10 || (cur_h - intended_h).abs() > 10 {
                             tracing::debug!(
                                 window_id = window.id,
-                                prev_w,
-                                prev_h,
+                                intended_w,
+                                intended_h,
                                 cur_w,
                                 cur_h,
+                                layout_engine_active = self.layout_engine_active,
                                 "marking manually resized window"
                             );
                             window.manual_position_override = true;
@@ -293,7 +302,20 @@ impl StateOwner {
                 }
             }
         }
-        self.last_applied_geometry = snapshot.window_geometry;
+        // When the layout engine is active, preserve its recorded target geometry
+        // so subsequent ingests compare against layout intent, not sway drift.
+        // Only add entries for windows we haven't seen yet.
+        if self.layout_engine_active {
+            for (&wid, &(w, h)) in &snapshot.window_geometry {
+                self.last_applied_geometry.entry(wid).or_insert((w, h));
+            }
+            // Prune windows that no longer exist.
+            let live_ids: HashSet<WindowId> = windows.iter().map(|w| w.id).collect();
+            self.last_applied_geometry
+                .retain(|wid, _| live_ids.contains(wid));
+        } else {
+            self.last_applied_geometry = snapshot.window_geometry;
+        }
 
         self.canvas_state.windows = windows;
         self.canvas_state.output = snapshot.output.clone();
@@ -618,6 +640,103 @@ impl StateOwner {
             ConflictOutcome::None,
         );
         Ok(target)
+    }
+
+    pub fn build_cluster_layout_inputs(&self) -> Vec<sway::backend::ClusterLayoutInput> {
+        let output_rect = sway::backend::Rect {
+            x: 0,
+            y: 0,
+            width: self.canvas_state.output.width,
+            height: self.canvas_state.output.height,
+        };
+        self.canvas_state
+            .clusters
+            .iter()
+            .map(|cluster| {
+                let mut excluded = std::collections::HashMap::new();
+                for &wid in &cluster.windows {
+                    if let Some(window) = self.canvas_state.windows.iter().find(|w| w.id == wid) {
+                        if let Some(reason) = exclusion_reason(window) {
+                            excluded.insert(wid, reason);
+                        }
+                    }
+                }
+                let first_seen_at = cluster
+                    .windows
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, &wid)| (wid, idx as u64))
+                    .collect();
+                sway::backend::ClusterLayoutInput {
+                    cluster_id: cluster.id,
+                    area: output_rect,
+                    windows: cluster.windows.clone(),
+                    first_seen_at,
+                    excluded_windows: excluded,
+                }
+            })
+            .collect()
+    }
+
+    pub fn current_window_geometry(
+        &self,
+    ) -> std::collections::HashMap<WindowId, sway::backend::Rect> {
+        self.last_applied_geometry
+            .iter()
+            .map(|(&wid, &(w, h))| {
+                (
+                    wid,
+                    sway::backend::Rect {
+                        x: 0,
+                        y: 0,
+                        width: w,
+                        height: h,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub fn update_applied_geometry(
+        &mut self,
+        targets: &std::collections::HashMap<WindowId, sway::backend::Rect>,
+    ) {
+        self.layout_engine_active = true;
+        for (&wid, rect) in targets {
+            self.last_applied_geometry
+                .insert(wid, (rect.width, rect.height));
+        }
+    }
+
+    pub fn layout_context(&self) -> sway::backend::LayoutComputeContext {
+        match &self.canvas_state.zoom {
+            ZoomLevel::Overview => sway::backend::LayoutComputeContext {
+                mode: sway::backend::LayoutMode::Overview,
+                focused_window_id: None,
+                focus_ratio: 0.75,
+            },
+            ZoomLevel::Cluster(_) => sway::backend::LayoutComputeContext {
+                mode: sway::backend::LayoutMode::Cluster,
+                focused_window_id: None,
+                focus_ratio: 0.75,
+            },
+            ZoomLevel::Focus(wid) => sway::backend::LayoutComputeContext {
+                mode: sway::backend::LayoutMode::Focus,
+                focused_window_id: Some(*wid),
+                focus_ratio: 0.75,
+            },
+        }
+    }
+
+    pub fn reload_config(&mut self) {
+        let config = config::Config::load().unwrap_or_default();
+        self.assignment_hints = config.continuum.assignment_hints;
+        self.auto_cluster = config.continuum.auto_cluster;
+        tracing::info!(
+            auto_cluster = self.auto_cluster,
+            hints = self.assignment_hints.len(),
+            "reloaded config into StateOwner"
+        );
     }
 
     pub fn flush_pending_persistence(&mut self) {
@@ -1232,4 +1351,20 @@ fn collect_windows_from_tree(
     for child in &node.floating_nodes {
         collect_windows_from_tree(child, cluster_id, out, geometry_out);
     }
+}
+
+fn exclusion_reason(window: &Window) -> Option<sway::backend::LayoutExclusionReason> {
+    if window.state == WindowState::Fullscreen {
+        return Some(sway::backend::LayoutExclusionReason::FullscreenTemporaryOverride);
+    }
+    if window.transient_for.is_some() || window.role == WindowRole::Dialog {
+        return Some(sway::backend::LayoutExclusionReason::TransientDialogAttached);
+    }
+    if window.role == WindowRole::Utility {
+        return Some(sway::backend::LayoutExclusionReason::OverlayOrPopup);
+    }
+    if window.manual_position_override {
+        return Some(sway::backend::LayoutExclusionReason::ManualResize);
+    }
+    None
 }

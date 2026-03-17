@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use swayipc::{Connection, EventType, Node};
 
+mod daemon;
 mod state_store;
 use state_store::with_state_owner;
 
@@ -52,6 +53,8 @@ enum Commands {
         #[command(subcommand)]
         command: IpcCommands,
     },
+    /// Run the persistent daemon with layout engine and Unix socket IPC.
+    Daemon,
 }
 
 #[derive(Debug, Subcommand)]
@@ -236,6 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Logout => logout()?,
         Commands::DumpState { pretty } => dump_state(pretty)?,
         Commands::Ipc { command } => ipc(command)?,
+        Commands::Daemon => daemon::run_daemon()?,
     }
 
     with_state_owner(|owner| owner.flush_pending_persistence());
@@ -346,13 +350,46 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let response = dispatch_ipc_request(request)?;
+    let response = dispatch_via_daemon_or_direct(request)?;
     if pretty {
         println!("{}", serde_json::to_string_pretty(&response)?);
     } else {
         println!("{}", serde_json::to_string(&response)?);
     }
     Ok(())
+}
+
+fn dispatch_via_daemon_or_direct(
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader, Write as _};
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = common::contracts::daemon_socket_path();
+    if socket_path.exists() {
+        match UnixStream::connect(&socket_path) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+                let json = serde_json::to_string(&request)?;
+                let mut writer = stream.try_clone()?;
+                writeln!(writer, "{json}")?;
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                reader.read_line(&mut line)?;
+                let response: IpcResponse = serde_json::from_str(line.trim())?;
+                return Ok(response);
+            }
+            Err(e) => {
+                warn!(
+                    ?e,
+                    path = %socket_path.display(),
+                    "daemon socket exists but connection failed, falling back to direct dispatch"
+                );
+            }
+        }
+    }
+    dispatch_ipc_request(request)
 }
 
 fn outputs_linked() -> bool {
@@ -372,7 +409,9 @@ fn needs_sway_ingest(request: &IpcRequest) -> bool {
     )
 }
 
-fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std::error::Error>> {
+pub(crate) fn dispatch_ipc_request(
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error>> {
     if needs_sway_ingest(&request) {
         with_state_owner(|owner| owner.ingest_sway_facts())?;
     }
@@ -893,11 +932,14 @@ fn reload() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Signal daemon (same binary name) so it reloads config via SIGHUP.
+    let _ = send_reload_signal("vibeshellctl");
+
     for component in [Component::Panel, Component::Launcher, Component::Notifd] {
         send_reload_signal(component.process_name())?;
     }
 
-    println!("reload requested (sway + vibeshell components)");
+    println!("reload requested (sway + vibeshell components + daemon)");
     Ok(())
 }
 

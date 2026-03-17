@@ -1,8 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-pub type ClusterId = i64;
-pub type WindowId = i64;
+pub use common::contracts::{ClusterId, WindowId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceMetadata {
