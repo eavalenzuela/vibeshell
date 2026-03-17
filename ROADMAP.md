@@ -7,17 +7,17 @@
 - [x] Bindings: Mod+Wheel (zoom), Mod+Drag / Mod+Arrows (pan), Mod+Enter (dive), Mod+Esc (zoom out)
 - [x] Clusters (task neighborhoods) — create, rename, move on canvas
 - [x] Assign focused window to cluster
-- [ ] "Auto-cluster" heuristic v1: by app_id/class (optional toggle)
-- [ ] Fast recall — "Recent clusters" switcher (Alt-Tab equivalent for clusters)
-- [ ] Launcher can search windows and clusters
+- [x] "Auto-cluster" heuristic v1: by app_id/class (optional toggle) *(Phase 6.5)*
+- [x] Fast recall — "Recent clusters" switcher (Alt-Tab equivalent for clusters) *(Phase 6.5)*
+- [x] Launcher can search windows and clusters *(Phase 6.5)*
 - [x] Persistence — save/restore cluster positions, window→cluster mapping, last viewport/zoom
-- [ ] Graceful handling when windows are missing (apps closed)
+- [x] Graceful handling when windows are missing (apps closed) — `prune_stale_entries()` removes stale refs on ingest
 
 ### Must-have desktop-reality features
-- [ ] Multi-monitor: per-output viewport (even with one global canvas)
-- [ ] Basic rules: float dialogs, keep transient windows attached to parent
-- [ ] Handle special windows: fullscreen, scratchpad, modals, popups
-- [ ] Non-jank repositioning: debounce geometry updates, respect manual resize overrides
+- [x] Multi-monitor: per-output viewport (even with one global canvas) *(Phase 6.5)*
+- [x] Basic rules: float dialogs, keep transient windows attached to parent — `anchor_transient_dialogs()` + `WindowRole::Dialog`
+- [x] Handle special windows: fullscreen, scratchpad, modals, popups — fullscreen/floating/dialog/popup detection; scratchpad TBD
+- [x] Non-jank repositioning: debounce geometry updates, respect manual resize overrides *(Phase 6.5)*
 
 ### Explicit non-goals (keep v1 shippable)
 - Perfect smooth animation (step transitions first)
@@ -120,7 +120,7 @@
 - [x] Persist: last active cluster + viewport/zoom level (`active_cluster` added to `PersistedOverviewState`)
 - [x] Fullscreen window handling: preserve zoom level when a fullscreen window is in focus
 - [x] Dialogs transient_for parent: `anchor_transient_dialogs()` assigns transient windows to parent cluster
-- [ ] Multi-output: at least don't break; per-output viewport ideally *(deferred)*
+- [x] Multi-output: per-output viewport via `VIBESHELL_OUTPUT` env var *(Phase 6.5)*
 
 **Exit criteria:** restart session and the workspace landscape comes back sensibly. ✓
 
@@ -142,7 +142,32 @@
 
 ---
 
-### [ ] Phase 7 — Compositor decision
+### [x] Phase 6.5 — Remaining v1 feature gaps
+
+- [x] "Auto-cluster" heuristic v1: `auto_cluster_by_app_id()` — when `auto_cluster = true`, unassigned windows with matching `app_id` auto-route to existing cluster
+- [x] Fast recall — `CycleCluster { direction }` IPC + `cluster_history` MRU tracking in `StateOwner`; `Mod+Tab` / `Mod+Shift+Tab` keybindings
+- [x] Launcher: search windows (by title/app_id) and clusters (by name); `SearchResult` enum merges with app results; activate focuses window or switches cluster
+- [x] Non-jank repositioning: `ManualResize` added to `LayoutExclusionReason`; geometry tracking (`last_applied_geometry`) in `StateOwner`; tiled windows diverging >10px marked `manual_position_override`
+- [x] Multi-monitor: `VIBESHELL_OUTPUT` env var → `output_name` in `WidgetState`; overlay uses `output_viewports.get(output_name)` for rendering; pan/zoom IPC passes `output` parameter
+
+**Exit criteria:** daily-driver usable across multi-monitor setups with no surprise window shuffling. ✓
+
+---
+
+### [x] Phase 7 — SelectCluster + keyboard move operations
+
+- [x] `SelectCluster`: CLI `select-cluster <id>` → `IpcRequest::SelectCluster` → updates `selected_cluster_id` (no zoom change)
+- [x] `EnterKeyboardMoveMode`: CLI `enter-keyboard-move-mode <id>` → records `keyboard_move_origin` in `StateOwner`
+- [x] `KeyboardMoveBy`: CLI `keyboard-move-by <dx> <dy>` → adds delta to cluster position
+- [x] `CommitKeyboardMove`: CLI `commit-keyboard-move` → `persist_immediate` + clear origin
+- [x] `CancelKeyboardMove`: CLI `cancel-keyboard-move` → restore cluster to origin coords
+- [x] All 5 `MutationType` variants wired end-to-end (CLI → IpcRequest → state_store)
+
+**Exit criteria:** keyboard-only cluster selection and repositioning works without entering Overview drag mode. ✓
+
+---
+
+### [ ] Phase 8 — Compositor decision
 
 - [ ] Evaluate whether wlroots compositor is needed
 - [ ] Trigger conditions: smooth transitions, true scene-graph thumbnails, deep gesture integration

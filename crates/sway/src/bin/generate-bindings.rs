@@ -31,6 +31,10 @@ struct BindingConfig {
     cycle_strip_forward_command: String,
     cycle_strip_backward_key: String,
     cycle_strip_backward_command: String,
+    cycle_cluster_forward_key: String,
+    cycle_cluster_forward_command: String,
+    cycle_cluster_backward_key: String,
+    cycle_cluster_backward_command: String,
 }
 
 impl Default for BindingConfig {
@@ -64,6 +68,12 @@ impl Default for BindingConfig {
             cycle_strip_forward_command: "vibeshellctl ipc cycle-strip-forward".to_owned(),
             cycle_strip_backward_key: "$mod+comma".to_owned(),
             cycle_strip_backward_command: "vibeshellctl ipc cycle-strip-backward".to_owned(),
+            cycle_cluster_forward_key: "$mod+Tab".to_owned(),
+            cycle_cluster_forward_command: "vibeshellctl ipc cycle-cluster --direction forward"
+                .to_owned(),
+            cycle_cluster_backward_key: "$mod+Shift+Tab".to_owned(),
+            cycle_cluster_backward_command: "vibeshellctl ipc cycle-cluster --direction backward"
+                .to_owned(),
         }
     }
 }
@@ -105,6 +115,10 @@ fn parse_args() -> Result<BindingConfig, String> {
             "--cycle-strip-forward-command" => config.cycle_strip_forward_command = value,
             "--cycle-strip-backward-key" => config.cycle_strip_backward_key = value,
             "--cycle-strip-backward-command" => config.cycle_strip_backward_command = value,
+            "--cycle-cluster-forward-key" => config.cycle_cluster_forward_key = value,
+            "--cycle-cluster-forward-command" => config.cycle_cluster_forward_command = value,
+            "--cycle-cluster-backward-key" => config.cycle_cluster_backward_key = value,
+            "--cycle-cluster-backward-command" => config.cycle_cluster_backward_command = value,
             "--help" | "-h" => return Err(help_text()),
             _ => return Err(format!("unknown argument: {flag}\n\n{}", help_text())),
         }
@@ -145,6 +159,10 @@ fn help_text() -> String {
         "  --cycle-strip-forward-command <command>",
         "  --cycle-strip-backward-key <key>",
         "  --cycle-strip-backward-command <command>",
+        "  --cycle-cluster-forward-key <key>",
+        "  --cycle-cluster-forward-command <command>",
+        "  --cycle-cluster-backward-key <key>",
+        "  --cycle-cluster-backward-command <command>",
     ]
     .join("\n")
 }
@@ -201,6 +219,14 @@ fn render(config: &BindingConfig) -> String {
             "bindsym {} exec {}",
             config.cycle_strip_backward_key, config.cycle_strip_backward_command
         ),
+        &format!(
+            "bindsym {} exec {}",
+            config.cycle_cluster_forward_key, config.cycle_cluster_forward_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.cycle_cluster_backward_key, config.cycle_cluster_backward_command
+        ),
         "",
         &format!(
             "bindsym {} exec {}",
@@ -254,6 +280,7 @@ mod tests {
         assert!(first.contains("bindsym XF86AudioRaiseVolume exec"));
         assert!(first.contains("bindsym $mod+equal exec vibeshellctl ipc zoom-in-mode"));
         assert!(first.contains("bindsym $mod+period exec vibeshellctl ipc cycle-strip-forward"));
+        assert!(first.contains("bindsym $mod+Tab exec vibeshellctl ipc cycle-cluster"));
         assert!(first.contains("bindsym $mod+Shift+r exec"));
     }
 }

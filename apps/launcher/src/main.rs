@@ -71,6 +71,157 @@ struct ScoredEntry {
 }
 
 #[derive(Clone)]
+enum SearchResult {
+    App(ScoredEntry),
+    Window {
+        score: i32,
+        window_id: u64,
+        title: String,
+        app_id: String,
+        cluster_name: String,
+    },
+    Cluster {
+        score: i32,
+        cluster_id: u64,
+        name: String,
+        window_count: usize,
+    },
+}
+
+impl SearchResult {
+    fn score(&self) -> i32 {
+        match self {
+            Self::App(e) => e.score,
+            Self::Window { score, .. } => *score,
+            Self::Cluster { score, .. } => *score,
+        }
+    }
+
+    fn display_title(&self) -> String {
+        match self {
+            Self::App(e) => e.entry.name.clone(),
+            Self::Window {
+                title,
+                app_id,
+                cluster_name,
+                ..
+            } => format!("[W] {title} ({app_id}) — {cluster_name}"),
+            Self::Cluster {
+                name, window_count, ..
+            } => format!("[C] {name} ({window_count} windows)"),
+        }
+    }
+
+    fn display_subtitle(&self) -> String {
+        match self {
+            Self::App(e) => {
+                if e.entry.keywords.is_empty() {
+                    e.entry.exec.clone()
+                } else {
+                    format!("{} · {}", e.entry.exec, e.entry.keywords.join(", "))
+                }
+            }
+            Self::Window { app_id, .. } => format!("Focus window · {app_id}"),
+            Self::Cluster { name, .. } => format!("Activate cluster · {name}"),
+        }
+    }
+
+    fn icon_name(&self) -> Option<&str> {
+        match self {
+            Self::App(e) => e.entry.icon.as_deref(),
+            Self::Window { .. } => Some("preferences-system-windows-symbolic"),
+            Self::Cluster { .. } => Some("view-grid-symbolic"),
+        }
+    }
+}
+
+fn fetch_canvas_state() -> Option<common::contracts::CanvasState> {
+    let output = Command::new("vibeshellctl")
+        .args(["ipc", "get-state"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let response: common::contracts::IpcResponse = serde_json::from_slice(&output.stdout).ok()?;
+    match response {
+        common::contracts::IpcResponse::State(state) => Some(state),
+        _ => None,
+    }
+}
+
+fn search_windows_and_clusters(
+    canvas: &common::contracts::CanvasState,
+    query: &str,
+    max_results: usize,
+) -> Vec<SearchResult> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let cluster_names: std::collections::HashMap<u64, &str> = canvas
+        .clusters
+        .iter()
+        .map(|c| (c.id, c.name.as_str()))
+        .collect();
+
+    let mut results = Vec::new();
+
+    // Score windows
+    for window in &canvas.windows {
+        let title_lower = window.title.to_lowercase();
+        let app_id_lower = window.app_id.as_deref().unwrap_or_default().to_lowercase();
+
+        let score = if app_id_lower.starts_with(query) {
+            MATCH_EXACT_PREFIX * 10_000
+        } else if title_lower.contains(query) {
+            MATCH_SUBSTRING * 10_000
+        } else if app_id_lower.contains(query) {
+            MATCH_KEYWORD * 10_000
+        } else {
+            continue;
+        };
+
+        let cluster_name = window
+            .cluster_id
+            .and_then(|id| cluster_names.get(&id).copied())
+            .unwrap_or("unassigned")
+            .to_owned();
+
+        results.push(SearchResult::Window {
+            score,
+            window_id: window.id,
+            title: window.title.clone(),
+            app_id: window.app_id.clone().unwrap_or_default(),
+            cluster_name,
+        });
+    }
+
+    // Score clusters
+    for cluster in &canvas.clusters {
+        let name_lower = cluster.name.to_lowercase();
+        let score = if name_lower.starts_with(query) {
+            MATCH_EXACT_PREFIX * 10_000
+        } else if name_lower.contains(query) {
+            MATCH_SUBSTRING * 10_000
+        } else {
+            continue;
+        };
+
+        results.push(SearchResult::Cluster {
+            score,
+            cluster_id: cluster.id,
+            name: cluster.name.clone(),
+            window_count: cluster.windows.len(),
+        });
+    }
+
+    results.sort_by_key(|r| std::cmp::Reverse(r.score()));
+    results.truncate(max_results);
+    results
+}
+
+#[derive(Clone)]
 struct RuntimeLauncherConfig {
     max_results: usize,
     terminal_command: String,
@@ -165,9 +316,10 @@ fn build_ui(
     container.set_center_widget(Some(&panel));
     window.set_content(Some(&container));
 
-    let state = Rc::new(RefCell::new(Vec::<ScoredEntry>::new()));
+    let state = Rc::new(RefCell::new(Vec::<SearchResult>::new()));
     let usage_path = usage_stats_path();
     let usage_stats = Rc::new(RefCell::new(load_usage_stats(&usage_path)));
+    let canvas_state: Rc<Option<common::contracts::CanvasState>> = Rc::new(fetch_canvas_state());
 
     {
         let apps = apps.clone();
@@ -175,14 +327,24 @@ fn build_ui(
         let state = state.clone();
         let usage_stats = usage_stats.clone();
         let runtime_config = Arc::clone(&runtime_config);
+        let canvas_state = Rc::clone(&canvas_state);
         input.connect_changed(move |entry| {
             let query = entry.text().to_string();
             let max_results = runtime_config
                 .lock()
                 .expect("runtime config poisoned")
                 .max_results;
-            let ranked = rank_entries(&apps, &query, max_results, &usage_stats.borrow());
-            populate_results(&list, &state, &ranked);
+            let app_results = rank_entries(&apps, &query, max_results, &usage_stats.borrow());
+            let mut merged: Vec<SearchResult> =
+                app_results.into_iter().map(SearchResult::App).collect();
+            if let Some(canvas) = canvas_state.as_ref() {
+                let normalized = query.trim().to_lowercase();
+                let wc_results = search_windows_and_clusters(canvas, &normalized, max_results);
+                merged.extend(wc_results);
+            }
+            merged.sort_by_key(|r| std::cmp::Reverse(r.score()));
+            merged.truncate(max_results);
+            populate_search_results(&list, &state, &merged);
         });
     }
 
@@ -196,7 +358,7 @@ fn build_ui(
         let runtime_config = Arc::clone(&runtime_config);
         input.connect_activate(move |_| {
             let index = selected_index(&list).unwrap_or(0);
-            if launch_selected(
+            if activate_search_result(
                 &state.borrow(),
                 index,
                 &runtime_config
@@ -246,7 +408,7 @@ fn build_ui(
                 } else {
                     LaunchMode::Default
                 };
-                if launch_selected(
+                if activate_search_result(
                     &state.borrow(),
                     index,
                     &runtime_config
@@ -277,7 +439,7 @@ fn build_ui(
         let runtime_config = Arc::clone(&runtime_config);
         list.connect_row_activated(move |_, row| {
             let index = row.index() as usize;
-            if launch_selected(
+            if activate_search_result(
                 &state.borrow(),
                 index,
                 &runtime_config
@@ -295,10 +457,8 @@ fn build_ui(
         });
     }
 
-    populate_results(
-        &list,
-        &state,
-        &rank_entries(
+    {
+        let app_results = rank_entries(
             &apps,
             "",
             runtime_config
@@ -306,8 +466,10 @@ fn build_ui(
                 .expect("runtime config poisoned")
                 .max_results,
             &usage_stats.borrow(),
-        ),
-    );
+        );
+        let initial: Vec<SearchResult> = app_results.into_iter().map(SearchResult::App).collect();
+        populate_search_results(&list, &state, &initial);
+    }
 
     window.present();
     input.grab_focus();
@@ -453,10 +615,10 @@ fn has_word_prefix(text: &str, query: &str) -> bool {
         .any(|word| word.starts_with(query))
 }
 
-fn populate_results(
+fn populate_search_results(
     list: &gtk::ListBox,
-    state: &Rc<RefCell<Vec<ScoredEntry>>>,
-    ranked: &[ScoredEntry],
+    state: &Rc<RefCell<Vec<SearchResult>>>,
+    results: &[SearchResult],
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
@@ -465,26 +627,16 @@ fn populate_results(
     {
         let mut guard = state.borrow_mut();
         guard.clear();
-        guard.extend_from_slice(ranked);
+        guard.extend(results.iter().cloned());
     }
 
-    for scored in ranked {
-        let subtitle = if scored.entry.keywords.is_empty() {
-            scored.entry.exec.clone()
-        } else {
-            format!(
-                "{} · {}",
-                scored.entry.exec,
-                scored.entry.keywords.join(", ")
-            )
-        };
-
+    for result in results {
         let row = adw::ActionRow::builder()
-            .title(&scored.entry.name)
-            .subtitle(&subtitle)
+            .title(result.display_title())
+            .subtitle(result.display_subtitle())
             .build();
         row.set_activatable(true);
-        if let Some(icon_name) = scored.entry.icon.as_deref() {
+        if let Some(icon_name) = result.icon_name() {
             let image = gtk::Image::from_icon_name(icon_name);
             row.add_prefix(&image);
         }
@@ -514,41 +666,71 @@ fn move_selection(list: &gtk::ListBox, direction: i32) {
     }
 }
 
-fn launch_selected(
-    entries: &[ScoredEntry],
+fn activate_search_result(
+    results: &[SearchResult],
     index: usize,
     terminal_command: &str,
     mode: LaunchMode,
     usage_stats: &Rc<RefCell<UsageStats>>,
     usage_path: &PathBuf,
 ) -> Result<(), String> {
-    let Some(selected) = entries.get(index) else {
+    let Some(selected) = results.get(index) else {
         return Err("no selection".to_owned());
     };
 
-    let cmd = build_exec_command(&selected.entry).map_err(|error| error.to_string())?;
-    tracing::info!(entry = selected.entry.name, ?cmd, "launching desktop entry");
+    match selected {
+        SearchResult::App(scored) => {
+            let cmd = build_exec_command(&scored.entry).map_err(|error| error.to_string())?;
+            tracing::info!(entry = scored.entry.name, ?cmd, "launching desktop entry");
 
-    if selected.entry.terminal || matches!(mode, LaunchMode::ForceTerminal) {
-        let terminal = parse_terminal_command(terminal_command);
-        let mut command = Command::new(&terminal[0]);
-        command
-            .args(&terminal[1..])
-            .arg("-e")
-            .arg(&cmd[0])
-            .args(&cmd[1..]);
-        command.spawn().map_err(|error| error.to_string())?;
-    } else {
-        let mut command = Command::new(&cmd[0]);
-        command.args(&cmd[1..]);
-        command.spawn().map_err(|error| error.to_string())?;
-    }
+            if scored.entry.terminal || matches!(mode, LaunchMode::ForceTerminal) {
+                let terminal = parse_terminal_command(terminal_command);
+                let mut command = Command::new(&terminal[0]);
+                command
+                    .args(&terminal[1..])
+                    .arg("-e")
+                    .arg(&cmd[0])
+                    .args(&cmd[1..]);
+                command.spawn().map_err(|error| error.to_string())?;
+            } else {
+                let mut command = Command::new(&cmd[0]);
+                command.args(&cmd[1..]);
+                command.spawn().map_err(|error| error.to_string())?;
+            }
 
-    {
-        let mut usage = usage_stats.borrow_mut();
-        usage.record_launch(&selected.entry.id);
-        if let Err(error) = save_usage_stats(usage_path, &usage) {
-            tracing::warn!(?error, path = ?usage_path, "failed to persist launcher usage stats");
+            {
+                let mut usage = usage_stats.borrow_mut();
+                usage.record_launch(&scored.entry.id);
+                if let Err(error) = save_usage_stats(usage_path, &usage) {
+                    tracing::warn!(?error, path = ?usage_path, "failed to persist launcher usage stats");
+                }
+            }
+        }
+        SearchResult::Window {
+            window_id, title, ..
+        } => {
+            tracing::info!(
+                window_id,
+                title = title.as_str(),
+                "focusing window from launcher"
+            );
+            Command::new("swaymsg")
+                .args([&format!("[con_id={window_id}] focus")])
+                .spawn()
+                .map_err(|error| error.to_string())?;
+        }
+        SearchResult::Cluster {
+            cluster_id, name, ..
+        } => {
+            tracing::info!(
+                cluster_id,
+                name = name.as_str(),
+                "activating cluster from launcher"
+            );
+            Command::new("vibeshellctl")
+                .args(["ipc", "activate-cluster", &cluster_id.to_string()])
+                .spawn()
+                .map_err(|error| error.to_string())?;
         }
     }
 

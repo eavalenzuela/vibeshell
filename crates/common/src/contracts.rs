@@ -189,6 +189,9 @@ pub enum IpcRequest {
     },
     CommitKeyboardMove,
     CancelKeyboardMove,
+    CycleCluster {
+        direction: CycleDirection,
+    },
     CreateCluster {
         name: String,
         x: f64,
@@ -211,6 +214,13 @@ pub enum IpcRequest {
 pub enum ContextStripDirection {
     Next,
     Previous,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleDirection {
+    Forward,
+    Backward,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -408,6 +418,22 @@ mod tests {
         ] {
             let json = serde_json::to_string(&fixture).expect("serialize response");
             let parsed: IpcResponse = serde_json::from_str(&json).expect("parse response");
+            assert_eq!(parsed, fixture);
+        }
+    }
+
+    #[test]
+    fn round_trip_ipc_cycle_cluster() {
+        for fixture in [
+            IpcRequest::CycleCluster {
+                direction: CycleDirection::Forward,
+            },
+            IpcRequest::CycleCluster {
+                direction: CycleDirection::Backward,
+            },
+        ] {
+            let json = serde_json::to_string(&fixture).expect("serialize request");
+            let parsed: IpcRequest = serde_json::from_str(&json).expect("parse request");
             assert_eq!(parsed, fixture);
         }
     }

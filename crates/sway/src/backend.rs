@@ -169,6 +169,7 @@ pub enum LayoutExclusionReason {
     FullscreenTemporaryOverride,
     TransientDialogAttached,
     OverlayOrPopup,
+    ManualResize,
 }
 
 impl LayoutExclusionReason {
@@ -177,6 +178,7 @@ impl LayoutExclusionReason {
             Self::FullscreenTemporaryOverride => "fullscreen_temporary_override",
             Self::TransientDialogAttached => "transient_dialog_attached_to_parent",
             Self::OverlayOrPopup => "overlay_or_popup",
+            Self::ManualResize => "manual_resize",
         }
     }
 }

@@ -31,11 +31,13 @@ pub enum IpcMutation {
     OverviewPan {
         dx: f64,
         dy: f64,
+        output: Option<String>,
     },
     OverviewZoom {
         delta: f64,
         anchor_x: f64,
         anchor_y: f64,
+        output: Option<String>,
     },
     CreateCluster {
         name: String,
@@ -94,13 +96,17 @@ fn build_mutation_command(mutation: &IpcMutation) -> Command {
         IpcMutation::CancelKeyboardMove => {
             command.arg("cancel-keyboard-move");
         }
-        IpcMutation::OverviewPan { dx, dy } => {
+        IpcMutation::OverviewPan { dx, dy, ref output } => {
             command.args(["overview-pan", &dx.to_string(), &dy.to_string()]);
+            if let Some(output) = output {
+                command.args(["--output", output]);
+            }
         }
         IpcMutation::OverviewZoom {
             delta,
             anchor_x,
             anchor_y,
+            ref output,
         } => {
             command.args([
                 "overview-zoom",
@@ -108,6 +114,9 @@ fn build_mutation_command(mutation: &IpcMutation) -> Command {
                 &anchor_x.to_string(),
                 &anchor_y.to_string(),
             ]);
+            if let Some(output) = output {
+                command.args(["--output", output]);
+            }
         }
         IpcMutation::CreateCluster { name, x, y } => {
             command.args([

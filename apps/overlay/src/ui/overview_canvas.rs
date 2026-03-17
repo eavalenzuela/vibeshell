@@ -90,6 +90,7 @@ struct WidgetState {
     daemon_viewport: Viewport,
     has_local_viewport: bool,
     last_drag_ipc: Option<std::time::Instant>,
+    output_name: Option<String>,
     // Phase 4B
     snap_guides: Vec<SnapGuide>,
     pan_velocity: (f64, f64), // screen px per drag event (EMA-smoothed)
@@ -129,6 +130,8 @@ impl OverviewCanvas {
             .build();
         area.set_focusable(true);
 
+        let output_name = std::env::var("VIBESHELL_OUTPUT").ok();
+
         let data = Rc::new(RefCell::new(WidgetState {
             canvas_state: CanvasState::default(),
             selected_cluster: None,
@@ -139,6 +142,7 @@ impl OverviewCanvas {
             daemon_viewport: Viewport::default(),
             has_local_viewport: false,
             last_drag_ipc: None,
+            output_name,
             snap_guides: Vec::new(),
             pan_velocity: (0.0, 0.0),
             prev_drag_dx: 0.0,
@@ -372,7 +376,11 @@ impl OverviewCanvas {
                         let dx = state.canvas_state.viewport.x - state.daemon_viewport.x;
                         let dy = state.canvas_state.viewport.y - state.daemon_viewport.y;
                         if dx.abs() > 0.5 || dy.abs() > 0.5 {
-                            dispatch_ipc_mutation_detached(IpcMutation::OverviewPan { dx, dy });
+                            dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
+                                dx,
+                                dy,
+                                output: state.output_name.clone(),
+                            });
                             state.daemon_viewport = state.canvas_state.viewport.clone();
                             state.has_local_viewport = true;
                         }
@@ -421,6 +429,7 @@ impl OverviewCanvas {
                     delta,
                     anchor_x,
                     anchor_y,
+                    output: state.output_name.clone(),
                 });
                 state.has_local_viewport = true;
                 area.queue_draw();
@@ -556,6 +565,7 @@ impl OverviewCanvas {
                             delta: 1.0,
                             anchor_x,
                             anchor_y,
+                            output: state.output_name.clone(),
                         });
                         state.has_local_viewport = true;
                         area.queue_draw();
@@ -571,6 +581,7 @@ impl OverviewCanvas {
                             delta: -1.0,
                             anchor_x,
                             anchor_y,
+                            output: state.output_name.clone(),
                         });
                         state.has_local_viewport = true;
                         area.queue_draw();
@@ -589,6 +600,7 @@ impl OverviewCanvas {
                         dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
                             dx: 0.0,
                             dy: -delta,
+                            output: state.output_name.clone(),
                         });
                         state.daemon_viewport = state.canvas_state.viewport.clone();
                         state.has_local_viewport = true;
@@ -608,6 +620,7 @@ impl OverviewCanvas {
                         dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
                             dx: 0.0,
                             dy: delta,
+                            output: state.output_name.clone(),
                         });
                         state.daemon_viewport = state.canvas_state.viewport.clone();
                         state.has_local_viewport = true;
@@ -627,6 +640,7 @@ impl OverviewCanvas {
                         dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
                             dx: -delta,
                             dy: 0.0,
+                            output: state.output_name.clone(),
                         });
                         state.daemon_viewport = state.canvas_state.viewport.clone();
                         state.has_local_viewport = true;
@@ -646,6 +660,7 @@ impl OverviewCanvas {
                         dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
                             dx: delta,
                             dy: 0.0,
+                            output: state.output_name.clone(),
                         });
                         state.daemon_viewport = state.canvas_state.viewport.clone();
                         state.has_local_viewport = true;
@@ -735,13 +750,21 @@ impl OverviewCanvas {
         let mut data = self.data.borrow_mut();
         data.interaction.sync_zoom(state.zoom.clone());
 
+        // Use output-specific viewport when VIBESHELL_OUTPUT is set
+        let effective_viewport = data
+            .output_name
+            .as_ref()
+            .and_then(|name| state.output_viewports.get(name).cloned())
+            .unwrap_or_else(|| state.viewport.clone());
+
         // Always track what the daemon last acknowledged
-        data.daemon_viewport = state.viewport.clone();
+        data.daemon_viewport = effective_viewport.clone();
 
         // Preserve local viewport if the user has panned/zoomed since last poll
         let preserve = data.has_local_viewport;
         let local_viewport = data.canvas_state.viewport.clone();
         data.canvas_state = state;
+        data.canvas_state.viewport = effective_viewport;
         if preserve {
             data.canvas_state.viewport = local_viewport;
         }
@@ -1218,7 +1241,11 @@ fn start_recenter_anim(
             let dx = new_x - state.daemon_viewport.x;
             let dy = new_y - state.daemon_viewport.y;
             if dx.abs() > 0.5 || dy.abs() > 0.5 {
-                dispatch_ipc_mutation_detached(IpcMutation::OverviewPan { dx, dy });
+                dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
+                    dx,
+                    dy,
+                    output: state.output_name.clone(),
+                });
                 state.daemon_viewport.x = new_x;
                 state.daemon_viewport.y = new_y;
             }
@@ -1250,7 +1277,11 @@ fn start_inertia(area: &gtk::DrawingArea, data: Rc<RefCell<WidgetState>>) {
             let dx = vp_x - state.daemon_viewport.x;
             let dy = vp_y - state.daemon_viewport.y;
             if dx.abs() > 0.5 || dy.abs() > 0.5 {
-                dispatch_ipc_mutation_detached(IpcMutation::OverviewPan { dx, dy });
+                dispatch_ipc_mutation_detached(IpcMutation::OverviewPan {
+                    dx,
+                    dy,
+                    output: state.output_name.clone(),
+                });
                 state.daemon_viewport.x = vp_x;
                 state.daemon_viewport.y = vp_y;
             }

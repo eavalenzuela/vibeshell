@@ -7,8 +7,8 @@ use std::sync::{Mutex, OnceLock};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use common::contracts::{
-    CanvasState, ClusterId, ContextStripDirection, IpcRequest, IpcResponse, OutputState, Viewport,
-    Window, WindowId, ZoomLevel,
+    CanvasState, ClusterId, ContextStripDirection, CycleDirection, IpcRequest, IpcResponse,
+    OutputState, Viewport, Window, WindowId, ZoomLevel,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -79,12 +79,19 @@ enum IpcCommands {
     /// Cycle to the previous window in the context strip while in focus zoom.
     CycleContextStripPrevious,
     /// Pan the overview viewport by (dx, dy).
-    OverviewPan { dx: f64, dy: f64 },
+    OverviewPan {
+        dx: f64,
+        dy: f64,
+        #[arg(long)]
+        output: Option<String>,
+    },
     /// Zoom the overview viewport by delta at anchor position.
     OverviewZoom {
         delta: f64,
         anchor_x: f64,
         anchor_y: f64,
+        #[arg(long)]
+        output: Option<String>,
     },
     /// Create a new cluster with the given name at canvas position (x, y).
     CreateCluster { name: String, x: f64, y: f64 },
@@ -111,6 +118,17 @@ enum IpcCommands {
     CommitKeyboardMove,
     /// Cancel the keyboard move, reverting to the original position.
     CancelKeyboardMove,
+    /// Cycle through clusters in MRU order.
+    CycleCluster {
+        #[arg(long, default_value = "forward")]
+        direction: CycleDirectionArg,
+    },
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum CycleDirectionArg {
+    Forward,
+    Backward,
 }
 
 static FOCUS_HANDOFF: OnceLock<Mutex<FocusHandoffController>> = OnceLock::new();
@@ -245,24 +263,20 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
             },
             false,
         ),
-        IpcCommands::OverviewPan { dx, dy } => (
-            IpcRequest::OverviewPan {
-                dx,
-                dy,
-                output: None,
-            },
-            false,
-        ),
+        IpcCommands::OverviewPan { dx, dy, output } => {
+            (IpcRequest::OverviewPan { dx, dy, output }, false)
+        }
         IpcCommands::OverviewZoom {
             delta,
             anchor_x,
             anchor_y,
+            output,
         } => (
             IpcRequest::OverviewZoom {
                 delta,
                 anchor_canvas_x: anchor_x,
                 anchor_canvas_y: anchor_y,
-                output: None,
+                output,
             },
             false,
         ),
@@ -310,6 +324,13 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
         IpcCommands::KeyboardMoveBy { dx, dy } => (IpcRequest::KeyboardMoveBy { dx, dy }, false),
         IpcCommands::CommitKeyboardMove => (IpcRequest::CommitKeyboardMove, false),
         IpcCommands::CancelKeyboardMove => (IpcRequest::CancelKeyboardMove, false),
+        IpcCommands::CycleCluster { direction } => {
+            let dir = match direction {
+                CycleDirectionArg::Forward => CycleDirection::Forward,
+                CycleDirectionArg::Backward => CycleDirection::Backward,
+            };
+            (IpcRequest::CycleCluster { direction: dir }, false)
+        }
     };
 
     let response = dispatch_ipc_request(request)?;
@@ -334,7 +355,7 @@ fn outputs_linked() -> bool {
 fn needs_sway_ingest(request: &IpcRequest) -> bool {
     matches!(
         request,
-        IpcRequest::GetState | IpcRequest::CreateCluster { .. }
+        IpcRequest::GetState | IpcRequest::CreateCluster { .. } | IpcRequest::CycleCluster { .. }
     )
 }
 
@@ -574,6 +595,22 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
         IpcRequest::CancelKeyboardMove => {
             with_state_owner(|owner| owner.cancel_keyboard_move());
             Ok(IpcResponse::Ack)
+        }
+        IpcRequest::CycleCluster { direction } => {
+            let (result, previous_zoom, next_zoom, state) = with_state_owner(|owner| {
+                let previous_zoom = owner.state().zoom;
+                let result = owner.cycle_cluster(direction);
+                let state = owner.state();
+                let next_zoom = state.zoom.clone();
+                (result, previous_zoom, next_zoom, state)
+            });
+            match result {
+                Ok(cluster_id) => {
+                    apply_focus_handoff(previous_zoom, next_zoom, &state, Some(cluster_id), None)?;
+                    Ok(IpcResponse::Ack)
+                }
+                Err(message) => Ok(IpcResponse::Error { message }),
+            }
         }
         unsupported => Ok(IpcResponse::Error {
             message: json!({

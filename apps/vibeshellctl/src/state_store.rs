@@ -59,6 +59,7 @@ pub enum MutationType {
     KeyboardMoveBy,
     CommitKeyboardMove,
     CancelKeyboardMove,
+    CycleCluster,
 }
 
 #[derive(Debug)]
@@ -70,6 +71,9 @@ pub struct StateOwner {
     boot_persisted: Option<PersistedOverviewState>,
     focused_output: Option<String>,
     assignment_hints: Vec<AssignmentHint>,
+    auto_cluster: bool,
+    cluster_history: Vec<ClusterId>,
+    last_applied_geometry: BTreeMap<WindowId, (i32, i32)>,
     drag_origin: Option<(ClusterId, f64, f64)>,
     keyboard_move_origin: Option<(ClusterId, f64, f64)>,
 }
@@ -82,9 +86,9 @@ impl StateOwner {
         if let Some(persisted) = &boot_persisted {
             persisted.apply_to_canvas_seed(&mut canvas_state);
         }
-        let assignment_hints = config::Config::load()
-            .map(|cfg| cfg.continuum.assignment_hints)
-            .unwrap_or_default();
+        let config = config::Config::load().unwrap_or_default();
+        let assignment_hints = config.continuum.assignment_hints;
+        let auto_cluster = config.continuum.auto_cluster;
 
         Self {
             canvas_state,
@@ -94,6 +98,9 @@ impl StateOwner {
             boot_persisted,
             focused_output: None,
             assignment_hints,
+            auto_cluster,
+            cluster_history: Vec::new(),
+            last_applied_geometry: BTreeMap::new(),
             drag_origin: None,
             keyboard_move_origin: None,
         }
@@ -256,7 +263,35 @@ impl StateOwner {
         let previous_viewport = self.canvas_state.viewport.clone();
         let previous_focused_output = self.focused_output.clone();
         self.canvas_state.clusters = clusters;
-        self.canvas_state.windows = snapshot.windows;
+
+        // Mark manually resized windows: if a tiled window's geometry diverged
+        // from the last known geometry by >10px, flag it as manual_position_override.
+        let mut windows = snapshot.windows;
+        if !self.last_applied_geometry.is_empty() {
+            for window in &mut windows {
+                if window.manual_position_override || window.state != WindowState::Tiled {
+                    continue;
+                }
+                if let Some(&(prev_w, prev_h)) = self.last_applied_geometry.get(&window.id) {
+                    if let Some(&(cur_w, cur_h)) = snapshot.window_geometry.get(&window.id) {
+                        if (cur_w - prev_w).abs() > 10 || (cur_h - prev_h).abs() > 10 {
+                            tracing::debug!(
+                                window_id = window.id,
+                                prev_w,
+                                prev_h,
+                                cur_w,
+                                cur_h,
+                                "marking manually resized window"
+                            );
+                            window.manual_position_override = true;
+                        }
+                    }
+                }
+            }
+        }
+        self.last_applied_geometry = snapshot.window_geometry;
+
+        self.canvas_state.windows = windows;
         self.canvas_state.output = snapshot.output.clone();
         self.focused_output = Some(snapshot.output.name.clone());
         self.canvas_state.viewport = previous_viewport;
@@ -265,6 +300,9 @@ impl StateOwner {
             persisted.merge_into_live_canvas(&mut self.canvas_state);
         }
         self.apply_assignment_hints();
+        if self.auto_cluster {
+            self.auto_cluster_by_app_id();
+        }
         self.anchor_transient_dialogs();
 
         let connected_outputs = snapshot.outputs.iter().cloned().collect::<HashSet<_>>();
@@ -377,6 +415,8 @@ impl StateOwner {
             self.selected_cluster_id = Some(cluster_id);
             self.canvas_state.zoom = ZoomLevel::Cluster(cluster_id);
             self.focus_freeze = FocusFreezeMetadata::default();
+            self.cluster_history.retain(|&id| id != cluster_id);
+            self.cluster_history.insert(0, cluster_id);
             self.persist_after_mutation(&previous_state);
             self.bump_revision(prior, MutationType::ActivateCluster, ConflictOutcome::None);
             Ok(())
@@ -738,6 +778,48 @@ impl StateOwner {
         );
     }
 
+    pub fn cycle_cluster(
+        &mut self,
+        direction: common::contracts::CycleDirection,
+    ) -> Result<ClusterId, String> {
+        let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
+
+        // Prune history to only valid clusters
+        let valid_ids: HashSet<ClusterId> =
+            self.canvas_state.clusters.iter().map(|c| c.id).collect();
+        self.cluster_history.retain(|id| valid_ids.contains(id));
+
+        if self.cluster_history.len() <= 1 {
+            self.bump_revision(prior, MutationType::CycleCluster, ConflictOutcome::None);
+            return Err(
+                serde_json::json!({"error":"no_cycle_target","reason":"history_too_short"})
+                    .to_string(),
+            );
+        }
+
+        let current = self.selected_cluster_id.unwrap_or(0);
+        let pos = self
+            .cluster_history
+            .iter()
+            .position(|&id| id == current)
+            .unwrap_or(0);
+
+        let len = self.cluster_history.len();
+        let next_pos = match direction {
+            common::contracts::CycleDirection::Forward => (pos + 1) % len,
+            common::contracts::CycleDirection::Backward => (pos + len - 1) % len,
+        };
+        let target = self.cluster_history[next_pos];
+
+        self.selected_cluster_id = Some(target);
+        self.canvas_state.zoom = ZoomLevel::Cluster(target);
+        self.focus_freeze = FocusFreezeMetadata::default();
+        self.persist_after_mutation(&previous_state);
+        self.bump_revision(prior, MutationType::CycleCluster, ConflictOutcome::None);
+        Ok(target)
+    }
+
     fn update_boot_persisted(&mut self) {
         self.boot_persisted = Some(PersistedOverviewState::from_canvas(&self.canvas_state));
     }
@@ -822,6 +904,36 @@ impl StateOwner {
         }
     }
 
+    fn auto_cluster_by_app_id(&mut self) {
+        let mut app_id_to_cluster: BTreeMap<String, ClusterId> = BTreeMap::new();
+        for window in &self.canvas_state.windows {
+            if let (Some(app_id), Some(cluster_id)) = (&window.app_id, window.cluster_id) {
+                app_id_to_cluster
+                    .entry(app_id.to_ascii_lowercase())
+                    .or_insert(cluster_id);
+            }
+        }
+        for window in &mut self.canvas_state.windows {
+            if window.cluster_id.is_some()
+                || window.manual_cluster_override
+                || window.transient_for.is_some()
+            {
+                continue;
+            }
+            if let Some(app_id) = &window.app_id {
+                if let Some(&cluster_id) = app_id_to_cluster.get(&app_id.to_ascii_lowercase()) {
+                    tracing::debug!(
+                        window_id = window.id,
+                        app_id = app_id.as_str(),
+                        cluster_id,
+                        "auto-clustering window by app_id"
+                    );
+                    window.cluster_id = Some(cluster_id);
+                }
+            }
+        }
+    }
+
     fn anchor_transient_dialogs(&mut self) {
         let window_to_cluster: BTreeMap<WindowId, ClusterId> = self
             .canvas_state
@@ -894,6 +1006,7 @@ fn window_assignment_changed(previous: &CanvasState, next: &CanvasState) -> bool
 struct SwaySnapshot {
     clusters: Vec<Cluster>,
     windows: Vec<Window>,
+    window_geometry: BTreeMap<WindowId, (i32, i32)>,
     output: OutputState,
     outputs: Vec<String>,
     primary_output: Option<String>,
@@ -920,7 +1033,8 @@ fn sway_snapshot() -> Result<SwaySnapshot, Box<dyn std::error::Error>> {
     }
 
     let mut windows = Vec::new();
-    collect_windows_from_tree(&tree, None, &mut windows);
+    let mut window_geometry = BTreeMap::new();
+    collect_windows_from_tree(&tree, None, &mut windows, &mut window_geometry);
     windows.sort_by_key(|window| window.id);
 
     let mut windows_by_cluster: BTreeMap<ClusterId, Vec<WindowId>> = BTreeMap::new();
@@ -961,6 +1075,7 @@ fn sway_snapshot() -> Result<SwaySnapshot, Box<dyn std::error::Error>> {
     Ok(SwaySnapshot {
         clusters,
         windows,
+        window_geometry,
         output,
         outputs: connected_output_names,
         primary_output,
@@ -989,6 +1104,7 @@ fn collect_windows_from_tree(
     node: &swayipc::Node,
     cluster: Option<ClusterId>,
     out: &mut Vec<Window>,
+    geometry_out: &mut BTreeMap<WindowId, (i32, i32)>,
 ) {
     let cluster_id = if matches!(node.node_type, swayipc::NodeType::Workspace) {
         Some(node.id as ClusterId)
@@ -1033,8 +1149,10 @@ fn collect_windows_from_tree(
             WindowRole::Normal
         };
 
+        let window_id = node.id as WindowId;
+        geometry_out.insert(window_id, (node.rect.width, node.rect.height));
         out.push(Window {
-            id: node.id as WindowId,
+            id: window_id,
             title,
             app_id,
             class,
@@ -1054,9 +1172,9 @@ fn collect_windows_from_tree(
     }
 
     for child in &node.nodes {
-        collect_windows_from_tree(child, cluster_id, out);
+        collect_windows_from_tree(child, cluster_id, out, geometry_out);
     }
     for child in &node.floating_nodes {
-        collect_windows_from_tree(child, cluster_id, out);
+        collect_windows_from_tree(child, cluster_id, out, geometry_out);
     }
 }
