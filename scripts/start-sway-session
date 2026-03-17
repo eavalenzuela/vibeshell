@@ -10,6 +10,7 @@ SWAY_ONLY="${VIBESHELL_SWAY_ONLY:-0}"
 PANEL_CMD="${VIBESHELL_PANEL_CMD:-cargo run -p panel}"
 LAUNCHER_CMD="${VIBESHELL_LAUNCHER_CMD:-cargo run -p launcher}"
 NOTIFD_CMD="${VIBESHELL_NOTIFD_CMD:-cargo run -p notifd}"
+OVERLAY_CMD="${VIBESHELL_OVERLAY_CMD:-cargo run -p overlay}"
 DEV_RESTART_MODE="${VIBESHELL_DEV_RESTART_MODE:-0}"
 RESTART_BACKOFF_SECONDS="${VIBESHELL_DEV_RESTART_BACKOFF_SECONDS:-2}"
 MAX_RESTART_BACKOFF_SECONDS="${VIBESHELL_DEV_RESTART_MAX_BACKOFF_SECONDS:-15}"
@@ -41,6 +42,10 @@ CYCLE_STRIP_FORWARD_KEY="${VIBESHELL_CYCLE_STRIP_FORWARD_KEY:-\$mod+period}"
 CYCLE_STRIP_FORWARD_CMD="${VIBESHELL_CYCLE_STRIP_FORWARD_CMD:-vibeshellctl ipc cycle-strip-forward}"
 CYCLE_STRIP_BACKWARD_KEY="${VIBESHELL_CYCLE_STRIP_BACKWARD_KEY:-\$mod+comma}"
 CYCLE_STRIP_BACKWARD_CMD="${VIBESHELL_CYCLE_STRIP_BACKWARD_CMD:-vibeshellctl ipc cycle-strip-backward}"
+CYCLE_CLUSTER_FORWARD_KEY="${VIBESHELL_CYCLE_CLUSTER_FORWARD_KEY:-\$mod+Tab}"
+CYCLE_CLUSTER_FORWARD_CMD="${VIBESHELL_CYCLE_CLUSTER_FORWARD_CMD:-vibeshellctl ipc cycle-cluster --direction forward}"
+CYCLE_CLUSTER_BACKWARD_KEY="${VIBESHELL_CYCLE_CLUSTER_BACKWARD_KEY:-\$mod+Shift+Tab}"
+CYCLE_CLUSTER_BACKWARD_CMD="${VIBESHELL_CYCLE_CLUSTER_BACKWARD_CMD:-vibeshellctl ipc cycle-cluster --direction backward}"
 
 cargo run -p sway --bin generate-bindings -- \
   --output "${SWAY_BINDINGS_OUTPUT}" \
@@ -69,7 +74,11 @@ cargo run -p sway --bin generate-bindings -- \
   --cycle-strip-forward-key "${CYCLE_STRIP_FORWARD_KEY}" \
   --cycle-strip-forward-command "${CYCLE_STRIP_FORWARD_CMD}" \
   --cycle-strip-backward-key "${CYCLE_STRIP_BACKWARD_KEY}" \
-  --cycle-strip-backward-command "${CYCLE_STRIP_BACKWARD_CMD}"
+  --cycle-strip-backward-command "${CYCLE_STRIP_BACKWARD_CMD}" \
+  --cycle-cluster-forward-key "${CYCLE_CLUSTER_FORWARD_KEY}" \
+  --cycle-cluster-forward-command "${CYCLE_CLUSTER_FORWARD_CMD}" \
+  --cycle-cluster-backward-key "${CYCLE_CLUSTER_BACKWARD_KEY}" \
+  --cycle-cluster-backward-command "${CYCLE_CLUSTER_BACKWARD_CMD}"
 
 if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
   echo "XDG_RUNTIME_DIR is required to start Sway." >&2
@@ -250,6 +259,7 @@ if [[ "${SWAY_ONLY}" != "1" ]]; then
   start_component "panel" "${PANEL_CMD}" 0
   start_component "launcher" "${LAUNCHER_CMD}" 0
   start_component "notifd" "${NOTIFD_CMD}" 0
+  start_component "overlay" "${OVERLAY_CMD}" 0
 
   monitor_components &
   MONITOR_PID=$!

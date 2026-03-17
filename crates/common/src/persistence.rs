@@ -27,6 +27,7 @@ pub struct PersistedOverviewState {
     pub clusters: Vec<PersistedCluster>,
     pub manual_window_assignments: BTreeMap<WindowId, ClusterId>,
     pub active_cluster: Option<ClusterId>,
+    pub cluster_history: Vec<ClusterId>,
 }
 
 impl PersistedOverviewState {
@@ -54,6 +55,7 @@ impl PersistedOverviewState {
                 ZoomLevel::Cluster(id) => Some(id),
                 _ => None,
             },
+            cluster_history: Vec::new(),
         }
     }
 

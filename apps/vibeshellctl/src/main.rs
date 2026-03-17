@@ -118,6 +118,13 @@ enum IpcCommands {
     CommitKeyboardMove,
     /// Cancel the keyboard move, reverting to the original position.
     CancelKeyboardMove,
+    /// Move a window to a different cluster.
+    MoveWindowToCluster {
+        window: WindowId,
+        cluster: ClusterId,
+    },
+    /// Rename a cluster.
+    RenameCluster { cluster: ClusterId, name: String },
     /// Cycle through clusters in MRU order.
     CycleCluster {
         #[arg(long, default_value = "forward")]
@@ -324,6 +331,12 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
         IpcCommands::KeyboardMoveBy { dx, dy } => (IpcRequest::KeyboardMoveBy { dx, dy }, false),
         IpcCommands::CommitKeyboardMove => (IpcRequest::CommitKeyboardMove, false),
         IpcCommands::CancelKeyboardMove => (IpcRequest::CancelKeyboardMove, false),
+        IpcCommands::MoveWindowToCluster { window, cluster } => {
+            (IpcRequest::MoveWindowToCluster { window, cluster }, false)
+        }
+        IpcCommands::RenameCluster { cluster, name } => {
+            (IpcRequest::RenameCluster { cluster, name }, false)
+        }
         IpcCommands::CycleCluster { direction } => {
             let dir = match direction {
                 CycleDirectionArg::Forward => CycleDirection::Forward,
@@ -609,6 +622,24 @@ fn dispatch_ipc_request(request: IpcRequest) -> Result<IpcResponse, Box<dyn std:
                     apply_focus_handoff(previous_zoom, next_zoom, &state, Some(cluster_id), None)?;
                     Ok(IpcResponse::Ack)
                 }
+                Err(message) => Ok(IpcResponse::Error { message }),
+            }
+        }
+        IpcRequest::Pan { dx, dy } => {
+            with_state_owner(|owner| owner.overview_pan(dx, dy, None, outputs_linked()));
+            Ok(IpcResponse::Ack)
+        }
+        IpcRequest::MoveWindowToCluster { window, cluster } => {
+            let result = with_state_owner(|owner| owner.move_window_to_cluster(window, cluster));
+            match result {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(message) => Ok(IpcResponse::Error { message }),
+            }
+        }
+        IpcRequest::RenameCluster { cluster, name } => {
+            let result = with_state_owner(|owner| owner.rename_cluster(cluster, &name));
+            match result {
+                Ok(()) => Ok(IpcResponse::Ack),
                 Err(message) => Ok(IpcResponse::Error { message }),
             }
         }

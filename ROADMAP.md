@@ -167,6 +167,33 @@
 
 ---
 
+### [ ] Wiring up — Unwired features audit
+
+Features and code paths that exist but are not fully wired into the running system.
+
+#### [x] Fixed (simple wiring)
+
+- [x] **Cluster MRU history not persisted**: `cluster_history` field existed in `StateOwner` but was never saved to or restored from `PersistedOverviewState` → added `cluster_history: Vec<ClusterId>` to `PersistedOverviewState`, populated in `update_boot_persisted()`, restored on boot
+- [x] **Overlay not launched by session script**: `scripts/start-sway-session` started panel/launcher/notifd but not overlay → added `OVERLAY_CMD` and `start_component "overlay"` to session startup
+- [x] **Cycle-cluster bindings not passed through session script**: `generate-bindings` defaults work, but session script had no env var override passthrough → added `CYCLE_CLUSTER_FORWARD_KEY/CMD` and `CYCLE_CLUSTER_BACKWARD_KEY/CMD` env vars and `--cycle-cluster-*` flags to the generate-bindings invocation
+- [x] **`IpcRequest::Pan` unhandled**: legacy `Pan { dx, dy }` variant fell through to `unsupported` catch-all → now forwarded to `overview_pan()`
+- [x] **`IpcRequest::MoveWindowToCluster` unhandled**: defined in contracts with tests but no dispatch handler → implemented `move_window_to_cluster()` in `StateOwner`, wired CLI subcommand `move-window-to-cluster`
+- [x] **`IpcRequest::RenameCluster` unhandled**: defined in contracts with tests but no dispatch handler → implemented `rename_cluster()` in `StateOwner`, wired CLI subcommand `rename-cluster`
+
+#### [ ] Remaining (needs design or significant work)
+
+- [ ] **FramePipeline / LayoutEngine dead code** (`crates/sway/src/backend.rs`): `FramePipeline::try_build_frame()`, `LayoutEngine::compute()`, `LayoutEngine::apply()`, `WorkspaceTransitionController` — comprehensive layout infrastructure with tests, but never called in production. No event-driven loop in vibeshellctl feeds sway events into the pipeline. vibeshellctl is entirely pull-based (IPC calls trigger state reads). **Wiring this requires**: an event subscription loop in vibeshellctl (or a persistent daemon mode) that subscribes to sway `Window`/`Workspace` events and feeds them into `FramePipeline`, then applies computed `LayoutOp`s via sway IPC.
+
+- [ ] **Non-jank geometry tracking incomplete** (`apps/vibeshellctl/src/state_store.rs`): `last_applied_geometry` tracks window dimensions between consecutive sway snapshots, but since FramePipeline never applies layouts, the "last applied" geometry is just "whatever sway had last time" — not the layout engine's target. Manual resize detection only catches geometry changes between polls, not divergence from layout intent. **Depends on**: FramePipeline wiring.
+
+- [ ] **StateOwner config not reloaded on SIGHUP**: `auto_cluster`, `assignment_hints` are loaded once at startup. `vibeshellctl reload` sends SIGHUP to panel/launcher/notifd but `StateOwner` (a `OnceLock<Mutex<StateOwner>>`) is never updated. Changing config requires restarting the entire session. **Fix**: add a reload path that re-reads config and updates `StateOwner` fields, either via SIGHUP in a daemon mode or by re-reading config on each `ingest_sway_facts()` call.
+
+- [ ] **Multi-monitor per-output overlay instances**: `VIBESHELL_OUTPUT` env var support exists in overlay, but `scripts/start-sway-session` launches a single overlay instance without setting it. Per-output instances need the session script to enumerate outputs and spawn one overlay per output with `VIBESHELL_OUTPUT=<name>`.
+
+- [ ] **Keyboard move bindings not generated**: `EnterKeyboardMoveMode`, `KeyboardMoveBy`, `CommitKeyboardMove`, `CancelKeyboardMove` have CLI subcommands but no keybindings in `generate-bindings`. The overlay handles these via its own key event handler (M key + arrows), but there are no global sway bindings for users who aren't in the overlay window.
+
+---
+
 ### [ ] Phase 8 — Compositor decision
 
 - [ ] Evaluate whether wlroots compositor is needed

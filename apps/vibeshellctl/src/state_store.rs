@@ -89,6 +89,10 @@ impl StateOwner {
         let config = config::Config::load().unwrap_or_default();
         let assignment_hints = config.continuum.assignment_hints;
         let auto_cluster = config.continuum.auto_cluster;
+        let cluster_history = boot_persisted
+            .as_ref()
+            .map(|p| p.cluster_history.clone())
+            .unwrap_or_default();
 
         Self {
             canvas_state,
@@ -99,7 +103,7 @@ impl StateOwner {
             focused_output: None,
             assignment_hints,
             auto_cluster,
-            cluster_history: Vec::new(),
+            cluster_history,
             last_applied_geometry: BTreeMap::new(),
             drag_origin: None,
             keyboard_move_origin: None,
@@ -778,6 +782,55 @@ impl StateOwner {
         );
     }
 
+    pub fn move_window_to_cluster(
+        &mut self,
+        window_id: WindowId,
+        cluster_id: ClusterId,
+    ) -> Result<(), String> {
+        let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
+        if !self
+            .canvas_state
+            .clusters
+            .iter()
+            .any(|c| c.id == cluster_id)
+        {
+            return Err(
+                serde_json::json!({"error":"cluster_not_found","cluster":cluster_id}).to_string(),
+            );
+        }
+        let window = self
+            .canvas_state
+            .windows
+            .iter_mut()
+            .find(|w| w.id == window_id)
+            .ok_or_else(|| {
+                serde_json::json!({"error":"window_not_found","window":window_id}).to_string()
+            })?;
+        window.cluster_id = Some(cluster_id);
+        window.manual_cluster_override = true;
+        self.persist_after_mutation(&previous_state);
+        self.bump_revision(prior, MutationType::SwayIngest, ConflictOutcome::None);
+        Ok(())
+    }
+
+    pub fn rename_cluster(&mut self, cluster_id: ClusterId, name: &str) -> Result<(), String> {
+        let prior = self.canvas_state.state_revision;
+        let previous_state = self.canvas_state.clone();
+        let cluster = self
+            .canvas_state
+            .clusters
+            .iter_mut()
+            .find(|c| c.id == cluster_id)
+            .ok_or_else(|| {
+                serde_json::json!({"error":"cluster_not_found","cluster":cluster_id}).to_string()
+            })?;
+        cluster.name = name.to_owned();
+        self.persist_after_mutation(&previous_state);
+        self.bump_revision(prior, MutationType::SwayIngest, ConflictOutcome::None);
+        Ok(())
+    }
+
     pub fn cycle_cluster(
         &mut self,
         direction: common::contracts::CycleDirection,
@@ -821,7 +874,9 @@ impl StateOwner {
     }
 
     fn update_boot_persisted(&mut self) {
-        self.boot_persisted = Some(PersistedOverviewState::from_canvas(&self.canvas_state));
+        let mut persisted = PersistedOverviewState::from_canvas(&self.canvas_state);
+        persisted.cluster_history = self.cluster_history.clone();
+        self.boot_persisted = Some(persisted);
     }
 
     fn persist_after_mutation(&mut self, previous: &CanvasState) {
