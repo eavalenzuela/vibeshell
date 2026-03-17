@@ -184,6 +184,7 @@ pub enum IpcRequest {
     EnterKeyboardMoveMode {
         cluster: ClusterId,
     },
+    EnterKeyboardMoveModeSelected,
     KeyboardMoveBy {
         dx: f64,
         dy: f64,
@@ -400,6 +401,7 @@ mod tests {
                 output: Some("DP-1".to_owned()),
             },
             IpcRequest::EnterKeyboardMoveMode { cluster: 7 },
+            IpcRequest::EnterKeyboardMoveModeSelected,
             IpcRequest::KeyboardMoveBy {
                 dx: -20.0,
                 dy: 40.0,

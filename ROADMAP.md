@@ -167,7 +167,7 @@
 
 ---
 
-### [ ] Wiring up — Unwired features audit
+### [x] Wiring up — Unwired features audit
 
 Features and code paths that exist but are not fully wired into the running system.
 
@@ -180,7 +180,7 @@ Features and code paths that exist but are not fully wired into the running syst
 - [x] **`IpcRequest::MoveWindowToCluster` unhandled**: defined in contracts with tests but no dispatch handler → implemented `move_window_to_cluster()` in `StateOwner`, wired CLI subcommand `move-window-to-cluster`
 - [x] **`IpcRequest::RenameCluster` unhandled**: defined in contracts with tests but no dispatch handler → implemented `rename_cluster()` in `StateOwner`, wired CLI subcommand `rename-cluster`
 
-#### [ ] Remaining (needs design or significant work)
+#### [x] Remaining (previously needed design or significant work)
 
 - [x] **FramePipeline / LayoutEngine dead code** (`crates/sway/src/backend.rs`): Wired via `vibeshellctl daemon` — a persistent daemon mode that subscribes to sway Window/Workspace events, feeds them into `FramePipeline`, and applies computed `LayoutOp`s via sway IPC. IPC clients (overlay, keybindings) connect via Unix socket (`$XDG_RUNTIME_DIR/vibeshell-daemon.sock`) with subprocess fallback. Type aliases unified (`i64` → `u64` via `common::contracts`). Session script launches daemon first.
 
@@ -188,9 +188,9 @@ Features and code paths that exist but are not fully wired into the running syst
 
 - [x] **StateOwner config not reloaded on SIGHUP**: Fixed by adding `reload_config()` to `StateOwner` (re-reads `auto_cluster` and `assignment_hints` from config). The daemon subscribes to SIGHUP via `common::spawn_reload_listener()` and calls `reload_config()` on signal. `vibeshellctl reload` now also sends SIGHUP to the daemon process (`pkill -HUP -x vibeshellctl`).
 
-- [ ] **Multi-monitor per-output overlay instances**: `VIBESHELL_OUTPUT` env var support exists in overlay, but `scripts/start-sway-session` launches a single overlay instance without setting it. Per-output instances need the session script to enumerate outputs and spawn one overlay per output with `VIBESHELL_OUTPUT=<name>`.
+- [x] **Multi-monitor per-output overlay instances**: Session script now enumerates outputs via `swaymsg -t get_outputs` and spawns one overlay per output with `VIBESHELL_OUTPUT=<name>`. Falls back to a single instance if output enumeration fails.
 
-- [ ] **Keyboard move bindings not generated**: `EnterKeyboardMoveMode`, `KeyboardMoveBy`, `CommitKeyboardMove`, `CancelKeyboardMove` have CLI subcommands but no keybindings in `generate-bindings`. The overlay handles these via its own key event handler (M key + arrows), but there are no global sway bindings for users who aren't in the overlay window.
+- [x] **Keyboard move bindings not generated**: Added `EnterKeyboardMoveModeSelected` IPC variant (uses currently selected cluster) + 8 new bindings in `generate-bindings`: `$mod+Shift+m` (enter move mode), `$mod+Shift+{Up,Down,Left,Right}` (move by 96px), `$mod+Shift+Return` (commit), `$mod+Shift+Escape` (cancel). All overridable via env vars in session script.
 
 ---
 

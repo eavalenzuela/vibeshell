@@ -47,6 +47,20 @@ CYCLE_CLUSTER_FORWARD_KEY="${VIBESHELL_CYCLE_CLUSTER_FORWARD_KEY:-\$mod+Tab}"
 CYCLE_CLUSTER_FORWARD_CMD="${VIBESHELL_CYCLE_CLUSTER_FORWARD_CMD:-vibeshellctl ipc cycle-cluster --direction forward}"
 CYCLE_CLUSTER_BACKWARD_KEY="${VIBESHELL_CYCLE_CLUSTER_BACKWARD_KEY:-\$mod+Shift+Tab}"
 CYCLE_CLUSTER_BACKWARD_CMD="${VIBESHELL_CYCLE_CLUSTER_BACKWARD_CMD:-vibeshellctl ipc cycle-cluster --direction backward}"
+KEYBOARD_MOVE_ENTER_KEY="${VIBESHELL_KEYBOARD_MOVE_ENTER_KEY:-\$mod+Shift+m}"
+KEYBOARD_MOVE_ENTER_CMD="${VIBESHELL_KEYBOARD_MOVE_ENTER_CMD:-vibeshellctl ipc enter-keyboard-move-mode-selected}"
+KEYBOARD_MOVE_UP_KEY="${VIBESHELL_KEYBOARD_MOVE_UP_KEY:-\$mod+Shift+Up}"
+KEYBOARD_MOVE_UP_CMD="${VIBESHELL_KEYBOARD_MOVE_UP_CMD:-vibeshellctl ipc keyboard-move-by --dx 0 --dy -96}"
+KEYBOARD_MOVE_DOWN_KEY="${VIBESHELL_KEYBOARD_MOVE_DOWN_KEY:-\$mod+Shift+Down}"
+KEYBOARD_MOVE_DOWN_CMD="${VIBESHELL_KEYBOARD_MOVE_DOWN_CMD:-vibeshellctl ipc keyboard-move-by --dx 0 --dy 96}"
+KEYBOARD_MOVE_LEFT_KEY="${VIBESHELL_KEYBOARD_MOVE_LEFT_KEY:-\$mod+Shift+Left}"
+KEYBOARD_MOVE_LEFT_CMD="${VIBESHELL_KEYBOARD_MOVE_LEFT_CMD:-vibeshellctl ipc keyboard-move-by --dx -96 --dy 0}"
+KEYBOARD_MOVE_RIGHT_KEY="${VIBESHELL_KEYBOARD_MOVE_RIGHT_KEY:-\$mod+Shift+Right}"
+KEYBOARD_MOVE_RIGHT_CMD="${VIBESHELL_KEYBOARD_MOVE_RIGHT_CMD:-vibeshellctl ipc keyboard-move-by --dx 96 --dy 0}"
+KEYBOARD_MOVE_COMMIT_KEY="${VIBESHELL_KEYBOARD_MOVE_COMMIT_KEY:-\$mod+Shift+Return}"
+KEYBOARD_MOVE_COMMIT_CMD="${VIBESHELL_KEYBOARD_MOVE_COMMIT_CMD:-vibeshellctl ipc commit-keyboard-move}"
+KEYBOARD_MOVE_CANCEL_KEY="${VIBESHELL_KEYBOARD_MOVE_CANCEL_KEY:-\$mod+Shift+Escape}"
+KEYBOARD_MOVE_CANCEL_CMD="${VIBESHELL_KEYBOARD_MOVE_CANCEL_CMD:-vibeshellctl ipc cancel-keyboard-move}"
 
 cargo run -p sway --bin generate-bindings -- \
   --output "${SWAY_BINDINGS_OUTPUT}" \
@@ -79,7 +93,21 @@ cargo run -p sway --bin generate-bindings -- \
   --cycle-cluster-forward-key "${CYCLE_CLUSTER_FORWARD_KEY}" \
   --cycle-cluster-forward-command "${CYCLE_CLUSTER_FORWARD_CMD}" \
   --cycle-cluster-backward-key "${CYCLE_CLUSTER_BACKWARD_KEY}" \
-  --cycle-cluster-backward-command "${CYCLE_CLUSTER_BACKWARD_CMD}"
+  --cycle-cluster-backward-command "${CYCLE_CLUSTER_BACKWARD_CMD}" \
+  --keyboard-move-enter-key "${KEYBOARD_MOVE_ENTER_KEY}" \
+  --keyboard-move-enter-command "${KEYBOARD_MOVE_ENTER_CMD}" \
+  --keyboard-move-up-key "${KEYBOARD_MOVE_UP_KEY}" \
+  --keyboard-move-up-command "${KEYBOARD_MOVE_UP_CMD}" \
+  --keyboard-move-down-key "${KEYBOARD_MOVE_DOWN_KEY}" \
+  --keyboard-move-down-command "${KEYBOARD_MOVE_DOWN_CMD}" \
+  --keyboard-move-left-key "${KEYBOARD_MOVE_LEFT_KEY}" \
+  --keyboard-move-left-command "${KEYBOARD_MOVE_LEFT_CMD}" \
+  --keyboard-move-right-key "${KEYBOARD_MOVE_RIGHT_KEY}" \
+  --keyboard-move-right-command "${KEYBOARD_MOVE_RIGHT_CMD}" \
+  --keyboard-move-commit-key "${KEYBOARD_MOVE_COMMIT_KEY}" \
+  --keyboard-move-commit-command "${KEYBOARD_MOVE_COMMIT_CMD}" \
+  --keyboard-move-cancel-key "${KEYBOARD_MOVE_CANCEL_KEY}" \
+  --keyboard-move-cancel-command "${KEYBOARD_MOVE_CANCEL_CMD}"
 
 if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
   echo "XDG_RUNTIME_DIR is required to start Sway." >&2
@@ -262,7 +290,18 @@ if [[ "${SWAY_ONLY}" != "1" ]]; then
   start_component "panel" "${PANEL_CMD}" 0
   start_component "launcher" "${LAUNCHER_CMD}" 0
   start_component "notifd" "${NOTIFD_CMD}" 0
-  start_component "overlay" "${OVERLAY_CMD}" 0
+
+  # Spawn one overlay instance per output for multi-monitor support.
+  # Each instance gets VIBESHELL_OUTPUT=<name> so it renders the correct per-output viewport.
+  mapfile -t SWAY_OUTPUTS < <(swaymsg -t get_outputs 2>/dev/null | grep -oP '"name":\s*"\K[^"]+')
+  if [[ ${#SWAY_OUTPUTS[@]} -gt 0 ]]; then
+    for output_name in "${SWAY_OUTPUTS[@]}"; do
+      start_component "overlay:${output_name}" "VIBESHELL_OUTPUT=${output_name} ${OVERLAY_CMD}" 0
+    done
+  else
+    log WARN "Could not enumerate outputs, launching single overlay instance"
+    start_component "overlay" "${OVERLAY_CMD}" 0
+  fi
 
   monitor_components &
   MONITOR_PID=$!

@@ -35,6 +35,20 @@ struct BindingConfig {
     cycle_cluster_forward_command: String,
     cycle_cluster_backward_key: String,
     cycle_cluster_backward_command: String,
+    keyboard_move_enter_key: String,
+    keyboard_move_enter_command: String,
+    keyboard_move_up_key: String,
+    keyboard_move_up_command: String,
+    keyboard_move_down_key: String,
+    keyboard_move_down_command: String,
+    keyboard_move_left_key: String,
+    keyboard_move_left_command: String,
+    keyboard_move_right_key: String,
+    keyboard_move_right_command: String,
+    keyboard_move_commit_key: String,
+    keyboard_move_commit_command: String,
+    keyboard_move_cancel_key: String,
+    keyboard_move_cancel_command: String,
 }
 
 impl Default for BindingConfig {
@@ -74,6 +88,25 @@ impl Default for BindingConfig {
             cycle_cluster_backward_key: "$mod+Shift+Tab".to_owned(),
             cycle_cluster_backward_command: "vibeshellctl ipc cycle-cluster --direction backward"
                 .to_owned(),
+            keyboard_move_enter_key: "$mod+Shift+m".to_owned(),
+            keyboard_move_enter_command: "vibeshellctl ipc enter-keyboard-move-mode-selected"
+                .to_owned(),
+            keyboard_move_up_key: "$mod+Shift+Up".to_owned(),
+            keyboard_move_up_command: "vibeshellctl ipc keyboard-move-by --dx 0 --dy -96"
+                .to_owned(),
+            keyboard_move_down_key: "$mod+Shift+Down".to_owned(),
+            keyboard_move_down_command: "vibeshellctl ipc keyboard-move-by --dx 0 --dy 96"
+                .to_owned(),
+            keyboard_move_left_key: "$mod+Shift+Left".to_owned(),
+            keyboard_move_left_command: "vibeshellctl ipc keyboard-move-by --dx -96 --dy 0"
+                .to_owned(),
+            keyboard_move_right_key: "$mod+Shift+Right".to_owned(),
+            keyboard_move_right_command: "vibeshellctl ipc keyboard-move-by --dx 96 --dy 0"
+                .to_owned(),
+            keyboard_move_commit_key: "$mod+Shift+Return".to_owned(),
+            keyboard_move_commit_command: "vibeshellctl ipc commit-keyboard-move".to_owned(),
+            keyboard_move_cancel_key: "$mod+Shift+Escape".to_owned(),
+            keyboard_move_cancel_command: "vibeshellctl ipc cancel-keyboard-move".to_owned(),
         }
     }
 }
@@ -119,6 +152,20 @@ fn parse_args() -> Result<BindingConfig, String> {
             "--cycle-cluster-forward-command" => config.cycle_cluster_forward_command = value,
             "--cycle-cluster-backward-key" => config.cycle_cluster_backward_key = value,
             "--cycle-cluster-backward-command" => config.cycle_cluster_backward_command = value,
+            "--keyboard-move-enter-key" => config.keyboard_move_enter_key = value,
+            "--keyboard-move-enter-command" => config.keyboard_move_enter_command = value,
+            "--keyboard-move-up-key" => config.keyboard_move_up_key = value,
+            "--keyboard-move-up-command" => config.keyboard_move_up_command = value,
+            "--keyboard-move-down-key" => config.keyboard_move_down_key = value,
+            "--keyboard-move-down-command" => config.keyboard_move_down_command = value,
+            "--keyboard-move-left-key" => config.keyboard_move_left_key = value,
+            "--keyboard-move-left-command" => config.keyboard_move_left_command = value,
+            "--keyboard-move-right-key" => config.keyboard_move_right_key = value,
+            "--keyboard-move-right-command" => config.keyboard_move_right_command = value,
+            "--keyboard-move-commit-key" => config.keyboard_move_commit_key = value,
+            "--keyboard-move-commit-command" => config.keyboard_move_commit_command = value,
+            "--keyboard-move-cancel-key" => config.keyboard_move_cancel_key = value,
+            "--keyboard-move-cancel-command" => config.keyboard_move_cancel_command = value,
             "--help" | "-h" => return Err(help_text()),
             _ => return Err(format!("unknown argument: {flag}\n\n{}", help_text())),
         }
@@ -163,6 +210,20 @@ fn help_text() -> String {
         "  --cycle-cluster-forward-command <command>",
         "  --cycle-cluster-backward-key <key>",
         "  --cycle-cluster-backward-command <command>",
+        "  --keyboard-move-enter-key <key>",
+        "  --keyboard-move-enter-command <command>",
+        "  --keyboard-move-up-key <key>",
+        "  --keyboard-move-up-command <command>",
+        "  --keyboard-move-down-key <key>",
+        "  --keyboard-move-down-command <command>",
+        "  --keyboard-move-left-key <key>",
+        "  --keyboard-move-left-command <command>",
+        "  --keyboard-move-right-key <key>",
+        "  --keyboard-move-right-command <command>",
+        "  --keyboard-move-commit-key <key>",
+        "  --keyboard-move-commit-command <command>",
+        "  --keyboard-move-cancel-key <key>",
+        "  --keyboard-move-cancel-command <command>",
     ]
     .join("\n")
 }
@@ -235,6 +296,35 @@ fn render(config: &BindingConfig) -> String {
         &format!(
             "bindsym {} exec {}",
             config.shell_restart_key, config.shell_restart_command
+        ),
+        "",
+        &format!(
+            "bindsym {} exec {}",
+            config.keyboard_move_enter_key, config.keyboard_move_enter_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.keyboard_move_up_key, config.keyboard_move_up_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.keyboard_move_down_key, config.keyboard_move_down_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.keyboard_move_left_key, config.keyboard_move_left_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.keyboard_move_right_key, config.keyboard_move_right_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.keyboard_move_commit_key, config.keyboard_move_commit_command
+        ),
+        &format!(
+            "bindsym {} exec {}",
+            config.keyboard_move_cancel_key, config.keyboard_move_cancel_command
         ),
         "",
     ]

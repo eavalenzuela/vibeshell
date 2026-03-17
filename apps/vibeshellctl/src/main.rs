@@ -115,6 +115,8 @@ enum IpcCommands {
     SelectCluster { cluster_id: ClusterId },
     /// Begin keyboard move mode for the given cluster.
     EnterKeyboardMoveMode { cluster_id: ClusterId },
+    /// Begin keyboard move mode for the currently selected cluster.
+    EnterKeyboardMoveModeSelected,
     /// Move the keyboard-moved cluster by (dx, dy) world units.
     KeyboardMoveBy { dx: f64, dy: f64 },
     /// Commit the keyboard move, persisting the new position.
@@ -332,6 +334,9 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
             },
             false,
         ),
+        IpcCommands::EnterKeyboardMoveModeSelected => {
+            (IpcRequest::EnterKeyboardMoveModeSelected, false)
+        }
         IpcCommands::KeyboardMoveBy { dx, dy } => (IpcRequest::KeyboardMoveBy { dx, dy }, false),
         IpcCommands::CommitKeyboardMove => (IpcRequest::CommitKeyboardMove, false),
         IpcCommands::CancelKeyboardMove => (IpcRequest::CancelKeyboardMove, false),
@@ -635,6 +640,20 @@ pub(crate) fn dispatch_ipc_request(
         IpcRequest::EnterKeyboardMoveMode { cluster } => {
             with_state_owner(|owner| owner.enter_keyboard_move_mode(cluster));
             Ok(IpcResponse::Ack)
+        }
+        IpcRequest::EnterKeyboardMoveModeSelected => {
+            let result = with_state_owner(|owner| {
+                if let Some(cluster_id) = owner.selected_cluster_id() {
+                    owner.enter_keyboard_move_mode(cluster_id);
+                    Ok(())
+                } else {
+                    Err("no cluster selected".to_owned())
+                }
+            });
+            match result {
+                Ok(()) => Ok(IpcResponse::Ack),
+                Err(message) => Ok(IpcResponse::Error { message }),
+            }
         }
         IpcRequest::KeyboardMoveBy { dx, dy } => {
             with_state_owner(|owner| owner.keyboard_move_by(dx, dy));
