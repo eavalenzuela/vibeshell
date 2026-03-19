@@ -13,6 +13,7 @@ just clippy        # Run strict linter
 just check         # Cargo check without building
 just smoke-binaries # Build all app binaries
 just ci            # Full CI suite (fmt-check + clippy + check + smoke-binaries)
+just smoke-test    # Headless integration test (starts Sway, daemon, exercises IPC)
 ```
 
 Running individual apps during development:

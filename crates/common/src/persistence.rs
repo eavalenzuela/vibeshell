@@ -82,6 +82,17 @@ impl PersistedOverviewState {
     }
 
     pub fn merge_into_live_canvas(&self, state: &mut CanvasState) {
+        self.merge_into_live_canvas_excluding(state, None);
+    }
+
+    /// Merge persisted state into the live canvas, but skip position updates
+    /// for `exclude_cluster` (used to protect in-flight drag/keyboard moves
+    /// from being overwritten by stale persisted positions).
+    pub fn merge_into_live_canvas_excluding(
+        &self,
+        state: &mut CanvasState,
+        exclude_cluster: Option<ClusterId>,
+    ) {
         state.viewport = self.viewport.clone();
         state.output_viewports = self.output_viewports.clone().into_iter().collect();
 
@@ -91,6 +102,9 @@ impl PersistedOverviewState {
             .map(|cluster| (cluster.id, (cluster.x, cluster.y)))
             .collect::<BTreeMap<_, _>>();
         for cluster in &mut state.clusters {
+            if exclude_cluster == Some(cluster.id) {
+                continue;
+            }
             if let Some((x, y)) = coords.remove(&cluster.id) {
                 cluster.x = x;
                 cluster.y = y;

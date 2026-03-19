@@ -34,6 +34,9 @@ smoke-binaries:
     cargo build -p notifd --bins
     cargo build -p vibeshellctl --bins
 
+smoke-test:
+    ./scripts/smoke-test
+
 ci: fmt-check clippy check smoke-binaries
 
 run-ctl *args:

@@ -15,6 +15,16 @@ bindsym $mod+equal exec vibeshellctl ipc zoom-in-mode
 bindsym $mod+minus exec vibeshellctl ipc zoom-out-mode
 bindsym $mod+period exec vibeshellctl ipc cycle-strip-forward
 bindsym $mod+comma exec vibeshellctl ipc cycle-strip-backward
+bindsym $mod+Tab exec vibeshellctl ipc cycle-cluster --direction forward
+bindsym $mod+Shift+Tab exec vibeshellctl ipc cycle-cluster --direction backward
 
 bindsym $mod+Shift+e exec swaymsg exit
 bindsym $mod+Shift+r exec swaymsg reload
+
+bindsym $mod+Shift+m exec vibeshellctl ipc enter-keyboard-move-mode-selected
+bindsym $mod+Shift+Up exec vibeshellctl ipc keyboard-move-by --dx 0 --dy -96
+bindsym $mod+Shift+Down exec vibeshellctl ipc keyboard-move-by --dx 0 --dy 96
+bindsym $mod+Shift+Left exec vibeshellctl ipc keyboard-move-by --dx -96 --dy 0
+bindsym $mod+Shift+Right exec vibeshellctl ipc keyboard-move-by --dx 96 --dy 0
+bindsym $mod+Shift+Return exec vibeshellctl ipc commit-keyboard-move
+bindsym $mod+Shift+Escape exec vibeshellctl ipc cancel-keyboard-move

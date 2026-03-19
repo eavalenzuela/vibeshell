@@ -118,7 +118,12 @@ enum IpcCommands {
     /// Begin keyboard move mode for the currently selected cluster.
     EnterKeyboardMoveModeSelected,
     /// Move the keyboard-moved cluster by (dx, dy) world units.
-    KeyboardMoveBy { dx: f64, dy: f64 },
+    KeyboardMoveBy {
+        #[arg(long, allow_hyphen_values = true)]
+        dx: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        dy: f64,
+    },
     /// Commit the keyboard move, persisting the new position.
     CommitKeyboardMove,
     /// Cancel the keyboard move, reverting to the original position.
@@ -598,7 +603,10 @@ pub(crate) fn dispatch_ipc_request(
         IpcRequest::CreateCluster { name, x, y } => {
             let mut conn = Connection::new()?;
             let escaped = name.replace('"', "\\\"");
-            let cmd = format!("workspace \"{escaped}\"; workspace back_and_forth");
+            // Switch to the new workspace so it exists when we ingest.
+            // Don't combine with back_and_forth — Sway GC's empty workspaces
+            // immediately, so the workspace must be focused during ingest.
+            let cmd = format!("workspace \"{escaped}\"");
             for reply in conn.run_command(&cmd)? {
                 if let Err(e) = reply {
                     tracing::warn!(?e, "sway workspace create warning");
@@ -606,6 +614,12 @@ pub(crate) fn dispatch_ipc_request(
             }
             with_state_owner(|owner| owner.ingest_sway_facts())?;
             let result = with_state_owner(|owner| owner.set_cluster_position_by_name(&name, x, y));
+            // Switch back to the previous workspace after ingest captured the new one.
+            for reply in conn.run_command("workspace back_and_forth")? {
+                if let Err(e) = reply {
+                    tracing::warn!(?e, "sway workspace switch-back warning");
+                }
+            }
             match result {
                 Ok(()) => Ok(IpcResponse::Ack),
                 Err(msg) => Ok(IpcResponse::Error { message: msg }),

@@ -323,7 +323,16 @@ impl StateOwner {
         self.canvas_state.viewport = previous_viewport;
 
         if let Some(persisted) = &self.boot_persisted {
-            persisted.merge_into_live_canvas(&mut self.canvas_state);
+            // Collect cluster IDs with in-flight moves (keyboard move or drag)
+            // so merge_into_live_canvas doesn't clobber uncommitted positions.
+            let in_flight_cluster = self
+                .keyboard_move_origin
+                .map(|(id, _, _)| id)
+                .or(self.drag_origin.map(|(id, _, _)| id));
+            persisted.merge_into_live_canvas_excluding(
+                &mut self.canvas_state,
+                in_flight_cluster,
+            );
         }
         self.apply_assignment_hints();
         if self.auto_cluster {
@@ -1193,7 +1202,10 @@ fn sway_snapshot() -> Result<SwaySnapshot, Box<dyn std::error::Error>> {
     let outputs = connection.get_outputs()?;
 
     let mut clusters = Vec::new();
-    for workspace in workspaces.into_iter().filter(|w| w.num >= 0) {
+    for workspace in workspaces
+        .into_iter()
+        .filter(|w| !w.name.starts_with("__i3"))
+    {
         clusters.push(Cluster {
             id: workspace.id as ClusterId,
             name: workspace.name,

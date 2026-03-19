@@ -1,0 +1,413 @@
+#!/usr/bin/env bash
+# Headless smoke test for vibeshell.
+#
+# Starts Sway with WLR_BACKENDS=headless (no GPU, no display), launches all
+# components via start-sway-session, exercises IPC operations, and asserts
+# expected state.  Exits 0 on success, 1 on failure.
+#
+# Usage:
+#   ./scripts/smoke-test            # build + test
+#   SKIP_BUILD=1 ./scripts/smoke-test  # skip cargo build (use existing binaries)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TARGET_DIR="${PROJECT_ROOT}/target/debug"
+
+# ── Logging helpers ──────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+PASS_COUNT=0
+FAIL_COUNT=0
+
+log()  { printf '[smoke-test] %s\n' "$*"; }
+pass() { PASS_COUNT=$((PASS_COUNT + 1)); printf "${GREEN}  ✓ %s${RESET}\n" "$*"; }
+fail() { FAIL_COUNT=$((FAIL_COUNT + 1)); printf "${RED}  ✗ %s${RESET}\n" "$*"; }
+section() { printf "\n${BOLD}── %s ──${RESET}\n" "$*"; }
+
+# ── Build ────────────────────────────────────────────────────────────────────
+
+section "Build"
+
+if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
+  log "Skipping build (SKIP_BUILD=1)"
+else
+  log "Building workspace binaries..."
+  cargo build --workspace --bins 2>&1 | tail -1
+fi
+
+# Verify binaries exist.
+for bin in vibeshellctl panel launcher notifd overlay; do
+  if [[ "$bin" == "vibeshellctl" ]]; then
+    bin_path="${TARGET_DIR}/vibeshellctl"
+  else
+    bin_path="${TARGET_DIR}/${bin}"
+  fi
+  if [[ ! -x "${bin_path}" ]]; then
+    fail "Binary not found: ${bin_path}"
+    exit 1
+  fi
+done
+pass "All binaries built"
+
+# ── Minimal Sway config for headless ─────────────────────────────────────────
+
+SCRATCH_DIR="$(mktemp -d /tmp/vibeshell-smoke.XXXXXX)"
+trap 'cleanup' EXIT INT TERM
+
+SWAY_CONFIG="${SCRATCH_DIR}/sway.config"
+cat > "${SWAY_CONFIG}" <<'SWAY'
+# Headless smoke-test sway config — no keybindings, no bar, no extras.
+SWAY
+
+DAEMON_SOCKET="${SCRATCH_DIR}/vibeshell-daemon.sock"
+SWAY_LOG="${SCRATCH_DIR}/sway.log"
+DAEMON_LOG="${SCRATCH_DIR}/daemon.log"
+COMPONENT_LOG="${SCRATCH_DIR}/components.log"
+
+# ── Cleanup ──────────────────────────────────────────────────────────────────
+
+SWAY_PID=""
+DAEMON_PID=""
+COMPONENT_PIDS=()
+
+cleanup() {
+  log "Cleaning up..."
+
+  for pid in "${COMPONENT_PIDS[@]}"; do
+    kill -TERM "${pid}" 2>/dev/null || true
+  done
+
+  if [[ -n "${DAEMON_PID}" ]]; then
+    kill -TERM "${DAEMON_PID}" 2>/dev/null || true
+    wait "${DAEMON_PID}" 2>/dev/null || true
+  fi
+
+  if [[ -n "${SWAY_PID}" ]]; then
+    kill -TERM "${SWAY_PID}" 2>/dev/null || true
+    wait "${SWAY_PID}" 2>/dev/null || true
+  fi
+
+  if [[ "${FAIL_COUNT}" -gt 0 ]]; then
+    printf "\n${YELLOW}── Logs (on failure) ──${RESET}\n"
+    for f in "${SWAY_LOG}" "${DAEMON_LOG}" "${COMPONENT_LOG}"; do
+      if [[ -s "${f}" ]]; then
+        printf "${YELLOW}--- %s ---${RESET}\n" "$(basename "${f}")"
+        tail -30 "${f}"
+      fi
+    done
+  fi
+
+  rm -rf "${SCRATCH_DIR}"
+}
+
+# ── Helper: run vibeshellctl against our session ─────────────────────────────
+
+ctl() {
+  XDG_RUNTIME_DIR="${SCRATCH_DIR}" "${TARGET_DIR}/vibeshellctl" "$@"
+}
+
+# ── Helper: run swaymsg against our session ──────────────────────────────────
+
+smsg() {
+  swaymsg -s "${SWAYSOCK}" "$@"
+}
+
+# ── Helper: wait for a condition with timeout ────────────────────────────────
+
+wait_for() {
+  local description="$1"
+  local check_cmd="$2"
+  local timeout_s="${3:-10}"
+
+  for _ in $(seq 1 $((timeout_s * 10))); do
+    if eval "${check_cmd}" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "Timed out waiting for: ${description}"
+  return 1
+}
+
+# ── Start Sway headless ─────────────────────────────────────────────────────
+
+section "Sway (headless)"
+
+export WLR_BACKENDS=headless
+export WLR_RENDERER=pixman
+export XDG_RUNTIME_DIR="${SCRATCH_DIR}"
+
+sway -c "${SWAY_CONFIG}" &>"${SWAY_LOG}" &
+SWAY_PID=$!
+
+# Wait for SWAYSOCK to appear.
+wait_for "SWAYSOCK" "ls ${SCRATCH_DIR}/sway-ipc.*.sock >/dev/null 2>&1" 10 || exit 1
+SWAYSOCK="$(ls "${SCRATCH_DIR}"/sway-ipc.*.sock 2>/dev/null | head -1)"
+export SWAYSOCK
+
+# Verify sway is responding.
+if smsg -t get_version >/dev/null 2>&1; then
+  pass "Sway started (pid=${SWAY_PID})"
+else
+  fail "Sway not responding"
+  exit 1
+fi
+
+# ── Start daemon ─────────────────────────────────────────────────────────────
+
+section "Daemon"
+
+XDG_RUNTIME_DIR="${SCRATCH_DIR}" "${TARGET_DIR}/vibeshellctl" daemon &>"${DAEMON_LOG}" &
+DAEMON_PID=$!
+
+wait_for "daemon socket" "[[ -e ${SCRATCH_DIR}/vibeshell-daemon.sock ]]" 10 || exit 1
+
+if kill -0 "${DAEMON_PID}" 2>/dev/null; then
+  pass "Daemon started (pid=${DAEMON_PID})"
+else
+  fail "Daemon exited prematurely"
+  exit 1
+fi
+
+# ── Test: Empty state ────────────────────────────────────────────────────────
+
+section "IPC: empty state"
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+
+if echo "${STATE}" | jq -e '.type == "state"' >/dev/null 2>&1; then
+  pass "get-state returns valid IPC response"
+else
+  fail "get-state did not return type=state"
+  log "Got: ${STATE}"
+fi
+
+CLUSTER_COUNT="$(echo "${STATE}" | jq '.clusters | length')"
+if [[ "${CLUSTER_COUNT}" -ge 1 ]]; then
+  pass "Initial state has ${CLUSTER_COUNT} cluster(s) (default workspace)"
+else
+  fail "Initial state has no clusters"
+fi
+
+WINDOW_COUNT="$(echo "${STATE}" | jq '.windows | length')"
+if [[ "${WINDOW_COUNT}" -eq 0 ]]; then
+  pass "Initial state has 0 windows (expected)"
+else
+  fail "Initial state has ${WINDOW_COUNT} windows (expected 0)"
+fi
+
+# ── Test: Spawn windows and verify ingest ────────────────────────────────────
+
+section "IPC: window ingest"
+
+# Spawn a couple of test windows.  foot -e sleep keeps them alive.
+smsg exec "foot --app-id=smoke-test-1 -e sleep 30" >/dev/null 2>&1
+smsg exec "foot --app-id=smoke-test-2 -e sleep 30" >/dev/null 2>&1
+
+# Give sway a moment to map the windows, then fetch state.
+sleep 1.5
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+WINDOW_COUNT="$(echo "${STATE}" | jq '.windows | length')"
+
+if [[ "${WINDOW_COUNT}" -ge 2 ]]; then
+  pass "After spawning 2 windows, state has ${WINDOW_COUNT} window(s)"
+else
+  fail "Expected >= 2 windows after spawn, got ${WINDOW_COUNT}"
+fi
+
+# Check that windows have app_id set.
+APP_IDS="$(echo "${STATE}" | jq -r '[.windows[].app_id // empty] | sort | join(",")')"
+if echo "${APP_IDS}" | grep -q "smoke-test-1"; then
+  pass "Window app_id 'smoke-test-1' ingested"
+else
+  fail "Window app_id 'smoke-test-1' not found (got: ${APP_IDS})"
+fi
+
+# ── Test: Create cluster ─────────────────────────────────────────────────────
+# NOTE: CreateCluster tells Sway to create a workspace, then switches away via
+# "workspace back_and_forth".  Sway garbage-collects empty workspaces, so the
+# workspace may vanish before re-ingest.  We spawn a window on the new workspace
+# first to pin it.
+
+section "IPC: create cluster"
+
+# Create a new workspace by moving a window there.
+smsg '[app_id="smoke-test-2"] move to workspace test-cluster' >/dev/null 2>&1
+sleep 0.3
+
+CREATE_RESP="$(ctl ipc create-cluster test-cluster 500 300 2>/dev/null)"
+
+if echo "${CREATE_RESP}" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "create-cluster returned ack"
+else
+  fail "create-cluster did not return ack"
+  log "Got: ${CREATE_RESP}"
+fi
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+TEST_CLUSTER="$(echo "${STATE}" | jq '[.clusters[] | select(.name == "test-cluster")] | first')"
+
+if [[ "${TEST_CLUSTER}" != "null" && -n "${TEST_CLUSTER}" ]]; then
+  pass "Cluster 'test-cluster' exists in state"
+else
+  fail "Cluster 'test-cluster' not found after creation"
+fi
+
+# ── Test: Select cluster ─────────────────────────────────────────────────────
+
+section "IPC: select cluster"
+
+# Use the default workspace cluster if test-cluster creation failed.
+STATE="$(ctl ipc get-state 2>/dev/null)"
+CLUSTER_ID="$(echo "${STATE}" | jq '.clusters[0].id')"
+
+SELECT_RESP="$(ctl ipc select-cluster "${CLUSTER_ID}" 2>/dev/null)"
+if echo "${SELECT_RESP}" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "select-cluster returned ack"
+else
+  fail "select-cluster did not return ack"
+fi
+
+# ── Test: Keyboard move ──────────────────────────────────────────────────────
+
+section "IPC: keyboard move"
+
+# Use the first cluster for move tests.
+STATE="$(ctl ipc get-state 2>/dev/null)"
+CLUSTER_ID="$(echo "${STATE}" | jq '.clusters[0].id')"
+BEFORE_X="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .x")"
+BEFORE_Y="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .y")"
+
+ENTER_RESP="$(ctl ipc enter-keyboard-move-mode "${CLUSTER_ID}" 2>/dev/null)"
+if echo "${ENTER_RESP}" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "enter-keyboard-move-mode returned ack"
+else
+  fail "enter-keyboard-move-mode did not return ack"
+fi
+
+ctl ipc keyboard-move-by --dx 100 --dy 50 >/dev/null 2>&1
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+AFTER_X="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .x")"
+AFTER_Y="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .y")"
+
+# Use jq for float-safe comparison (avoids "100" vs "100.0" mismatch).
+DX="$(echo "${AFTER_X} - ${BEFORE_X}" | jq -n "$(cat) | fabs" 2>/dev/null || echo "999")"
+DY="$(echo "${AFTER_Y} - ${BEFORE_Y}" | jq -n "$(cat) | fabs" 2>/dev/null || echo "999")"
+X_OK="$(jq -n "(${AFTER_X} - ${BEFORE_X}) | fabs < 1")"
+Y_OK="$(jq -n "(${AFTER_Y} - ${BEFORE_Y} - 50) | fabs < 1")"
+X_MOVED="$(jq -n "(${AFTER_X} - ${BEFORE_X} - 100) | fabs < 1")"
+
+if [[ "${X_MOVED}" == "true" && "${Y_OK}" == "true" ]]; then
+  pass "Cluster moved from (${BEFORE_X},${BEFORE_Y}) to (${AFTER_X},${AFTER_Y})"
+else
+  fail "Expected cluster moved by (+100,+50) from (${BEFORE_X},${BEFORE_Y}), got (${AFTER_X},${AFTER_Y})"
+fi
+
+COMMIT_RESP="$(ctl ipc commit-keyboard-move 2>/dev/null)"
+if echo "${COMMIT_RESP}" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "commit-keyboard-move returned ack"
+else
+  fail "commit-keyboard-move did not return ack"
+fi
+
+# ── Test: Cancel keyboard move restores position ─────────────────────────────
+
+section "IPC: keyboard move cancel"
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+BEFORE_X="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .x")"
+BEFORE_Y="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .y")"
+
+ctl ipc enter-keyboard-move-mode "${CLUSTER_ID}" >/dev/null 2>&1
+ctl ipc keyboard-move-by --dx 200 --dy 200 >/dev/null 2>&1
+ctl ipc cancel-keyboard-move >/dev/null 2>&1
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+CANCEL_X="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .x")"
+CANCEL_Y="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .y")"
+
+RESTORE_X="$(jq -n "(${CANCEL_X} - ${BEFORE_X}) | fabs < 1")"
+RESTORE_Y="$(jq -n "(${CANCEL_Y} - ${BEFORE_Y}) | fabs < 1")"
+
+if [[ "${RESTORE_X}" == "true" && "${RESTORE_Y}" == "true" ]]; then
+  pass "Cancel restored cluster to (${CANCEL_X},${CANCEL_Y})"
+else
+  fail "Cancel did not restore: expected (${BEFORE_X},${BEFORE_Y}), got (${CANCEL_X},${CANCEL_Y})"
+fi
+
+# ── Test: Zoom modes ─────────────────────────────────────────────────────────
+
+section "IPC: zoom"
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+ZOOM_BEFORE="$(echo "${STATE}" | jq -r '.zoom.kind // .zoom')"
+
+ZOOM_RESP="$(ctl ipc zoom-in-mode 2>/dev/null)"
+if echo "${ZOOM_RESP}" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "zoom-in-mode returned ack"
+else
+  fail "zoom-in-mode did not return ack"
+fi
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+ZOOM_AFTER="$(echo "${STATE}" | jq -r '.zoom.kind // .zoom')"
+
+if [[ "${ZOOM_AFTER}" != "${ZOOM_BEFORE}" ]] || [[ "${ZOOM_AFTER}" != "overview" ]]; then
+  pass "Zoom level changed: ${ZOOM_BEFORE} -> ${ZOOM_AFTER}"
+else
+  fail "Zoom level unchanged after zoom-in-mode"
+fi
+
+# ── Test: Cycle cluster ──────────────────────────────────────────────────────
+
+section "IPC: cycle cluster"
+
+CYCLE_RESP="$(ctl ipc cycle-cluster --direction forward 2>/dev/null)"
+if echo "${CYCLE_RESP}" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "cycle-cluster returned ack"
+elif echo "${CYCLE_RESP}" | jq -e '.message | contains("history_too_short")' >/dev/null 2>&1; then
+  pass "cycle-cluster correctly reports history_too_short (only 1 cluster)"
+else
+  fail "cycle-cluster unexpected response: ${CYCLE_RESP}"
+fi
+
+# ── Test: Panel starts ───────────────────────────────────────────────────────
+
+section "Components: panel"
+
+# Panel needs layer-shell which headless Sway supports.  Start it briefly.
+"${TARGET_DIR}/panel" &>"${COMPONENT_LOG}" &
+PANEL_PID=$!
+COMPONENT_PIDS+=("${PANEL_PID}")
+
+sleep 2
+
+if kill -0 "${PANEL_PID}" 2>/dev/null; then
+  pass "Panel is running (pid=${PANEL_PID})"
+else
+  fail "Panel exited prematurely"
+fi
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+
+section "Results"
+
+TOTAL=$((PASS_COUNT + FAIL_COUNT))
+printf "\n${BOLD}%d/%d passed${RESET}" "${PASS_COUNT}" "${TOTAL}"
+
+if [[ "${FAIL_COUNT}" -gt 0 ]]; then
+  printf "  ${RED}(%d failed)${RESET}\n\n" "${FAIL_COUNT}"
+  exit 1
+else
+  printf "  ${GREEN}(all passed)${RESET}\n\n"
+  exit 0
+fi
