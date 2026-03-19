@@ -37,6 +37,9 @@ smoke-binaries:
 smoke-test:
     ./scripts/smoke-test
 
+demo:
+    ./scripts/demo
+
 ci: fmt-check clippy check smoke-binaries
 
 run-ctl *args:

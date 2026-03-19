@@ -1,0 +1,425 @@
+#!/usr/bin/env bash
+# Interactive demo of vibeshell features.
+#
+# Runs a nested Sway session and walks through shell features with narrated
+# notifications and scripted actions.  Watch the nested Sway window to see
+# the demo.  The overlay is not started (it covers everything and grabs
+# keyboard), but all IPC operations are exercised via vibeshellctl.
+#
+# Usage:
+#   ./scripts/demo                 # build + run demo
+#   SKIP_BUILD=1 ./scripts/demo    # skip cargo build
+#   DEMO_PACE=3 ./scripts/demo     # seconds between steps (default: 4)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TARGET_DIR="${PROJECT_ROOT}/target/debug"
+PACE="${DEMO_PACE:-4}"
+
+# ── Build ────────────────────────────────────────────────────────────────────
+
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+  echo "[demo] Building workspace binaries..."
+  cargo build --workspace --bins 2>&1 | tail -1
+fi
+
+for bin in vibeshellctl panel launcher notifd; do
+  if [[ ! -x "${TARGET_DIR}/${bin}" ]]; then
+    echo "[demo] Binary not found: ${TARGET_DIR}/${bin}" >&2
+    exit 1
+  fi
+done
+
+# ── Scratch environment ──────────────────────────────────────────────────────
+
+SCRATCH_DIR="$(mktemp -d /tmp/vibeshell-demo.XXXXXX)"
+
+SWAY_CONFIG="${SCRATCH_DIR}/sway.config"
+SWAY_LOG="${SCRATCH_DIR}/sway.log"
+DAEMON_LOG="${SCRATCH_DIR}/daemon.log"
+
+SWAY_PID=""
+DAEMON_PID=""
+COMPONENT_PIDS=()
+
+cleanup() {
+  echo "[demo] Cleaning up..."
+  for pid in "${COMPONENT_PIDS[@]}"; do
+    kill -TERM "${pid}" 2>/dev/null || true
+  done
+  [[ -n "${DAEMON_PID}" ]] && kill -TERM "${DAEMON_PID}" 2>/dev/null || true
+  [[ -n "${SWAY_PID}" ]] && kill -TERM "${SWAY_PID}" 2>/dev/null || true
+  wait 2>/dev/null || true
+  rm -rf "${SCRATCH_DIR}"
+}
+trap cleanup EXIT INT TERM
+
+# ── Sway config for demo ────────────────────────────────────────────────────
+
+cat > "${SWAY_CONFIG}" <<'SWAY'
+set $mod Mod4
+bindsym $mod+Return exec foot
+bindsym Escape exec swaymsg '[app_id="com.vibeshell.launcher"] kill'
+# Give the demo a visible background.
+output * bg #1a1a2e solid_color
+# Gaps make window arrangement more visible.
+gaps inner 8
+gaps outer 4
+default_border pixel 2
+client.focused #6c63ff #6c63ff #ffffff #6c63ff #6c63ff
+client.unfocused #333355 #333355 #888888 #333355 #333355
+font pango:monospace 11
+SWAY
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+narrate() {
+  local title="$1"
+  local body="${2:-}"
+  echo ""
+  echo "  >> ${title}"
+  [[ -n "${body}" ]] && echo "     ${body}"
+  # Send via notify-send so notifd displays it in the session.
+  notify-send -a "vibeshell-demo" -t $((PACE * 1000)) "${title}" "${body}" 2>/dev/null || true
+}
+
+pause() {
+  sleep "${1:-$PACE}"
+}
+
+smsg() {
+  swaymsg -s "${SWAYSOCK}" "$@" >/dev/null 2>&1
+}
+
+ctl() {
+  XDG_RUNTIME_DIR="${SCRATCH_DIR}" "${TARGET_DIR}/vibeshellctl" "$@" 2>/dev/null
+}
+
+wait_for() {
+  local check_cmd="$1"
+  local timeout_s="${2:-10}"
+  for _ in $(seq 1 $((timeout_s * 10))); do
+    if eval "${check_cmd}" 2>/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# ── Start nested Sway ────────────────────────────────────────────────────────
+
+echo "[demo] Starting nested Sway session..."
+
+NESTED_BACKEND="${VIBESHELL_NESTED_BACKEND:-wayland}"
+case "${NESTED_BACKEND}" in
+  wayland) export WLR_BACKENDS=wayland ;;
+  x11)     export WLR_BACKENDS=x11 ;;
+  auto)
+    if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${DISPLAY:-}" ]]; then
+      export WLR_BACKENDS=x11
+    else
+      export WLR_BACKENDS=wayland
+    fi
+    ;;
+esac
+
+export XDG_RUNTIME_DIR="${SCRATCH_DIR}"
+
+mapfile -t PREEXISTING_WAYLAND_SOCKETS < <(
+  find "${SCRATCH_DIR}" -maxdepth 1 -type s -name 'wayland-*' -printf '%f\n' 2>/dev/null | sort
+)
+
+setsid sway -c "${SWAY_CONFIG}" &>"${SWAY_LOG}" &
+SWAY_PID=$!
+
+# Detect the nested Sway's WAYLAND_DISPLAY.
+for _ in $(seq 1 100); do
+  if ! kill -0 "${SWAY_PID}" 2>/dev/null; then
+    echo "[demo] Sway exited before WAYLAND_DISPLAY was detected" >&2
+    exit 1
+  fi
+  mapfile -t CURRENT_WAYLAND_SOCKETS < <(
+    find "${SCRATCH_DIR}" -maxdepth 1 -type s -name 'wayland-*' -printf '%f\n' 2>/dev/null | sort
+  )
+  for sock in "${CURRENT_WAYLAND_SOCKETS[@]}"; do
+    if [[ ! " ${PREEXISTING_WAYLAND_SOCKETS[*]:-} " =~ " ${sock} " ]]; then
+      export WAYLAND_DISPLAY="${sock}"
+      break 2
+    fi
+  done
+  sleep 0.1
+done
+
+if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+  echo "[demo] Failed to detect WAYLAND_DISPLAY" >&2
+  exit 1
+fi
+
+wait_for "ls ${SCRATCH_DIR}/sway-ipc.*.sock >/dev/null 2>&1" 10
+SWAYSOCK="$(ls "${SCRATCH_DIR}"/sway-ipc.*.sock 2>/dev/null | head -1)"
+export SWAYSOCK
+
+echo "[demo] Sway started (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
+
+# ── Start components (no overlay — it covers everything) ─────────────────────
+
+echo "[demo] Starting daemon, panel, notifd, launcher..."
+
+XDG_RUNTIME_DIR="${SCRATCH_DIR}" "${TARGET_DIR}/vibeshellctl" daemon &>"${DAEMON_LOG}" &
+DAEMON_PID=$!
+wait_for "[[ -e ${SCRATCH_DIR}/vibeshell-daemon.sock ]]" 10
+
+"${TARGET_DIR}/panel" &>/dev/null &
+COMPONENT_PIDS+=($!)
+
+"${TARGET_DIR}/notifd" &>/dev/null &
+COMPONENT_PIDS+=($!)
+
+# Give components a moment to initialize.
+sleep 1.5
+
+echo ""
+echo "========================================"
+echo "  vibeshell demo"
+echo "  Watch the nested Sway window."
+echo "  Pace: ${PACE}s between steps"
+echo "========================================"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACT 1: Panel & basic window management
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "Welcome to vibeshell" \
+  "A Wayland shell environment for Sway with cluster-based window management."
+pause
+
+narrate "The Panel" \
+  "The bar at the top shows workspaces, focused window title, and system status."
+pause
+
+narrate "Opening a terminal..." \
+  "Mod+Return opens foot (the default terminal)."
+smsg exec "foot --app-id=demo-term-1 -e bash -c 'echo \"Terminal 1 — vibeshell demo\"; sleep 300'"
+pause 2
+
+narrate "Opening a second terminal..."
+smsg exec "foot --app-id=demo-term-2 -e bash -c 'echo \"Terminal 2 — vibeshell demo\"; sleep 300'"
+pause 2
+
+narrate "Window tiling" \
+  "Sway tiles windows automatically. Both terminals share the screen."
+pause
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACT 2: Workspaces as clusters
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "Clusters (Workspaces)" \
+  "vibeshell maps Sway workspaces to 'clusters' — groups of windows on a 2D canvas."
+pause
+
+narrate "Creating cluster 'browser'..." \
+  "vibeshellctl ipc create-cluster places a new workspace on the canvas."
+ctl ipc create-cluster browser 400 0 >/dev/null
+pause 2
+
+narrate "Moving a window to the new cluster..."
+smsg "[app_id=\"demo-term-2\"] move to workspace browser"
+pause 2
+narrate "Window moved" \
+  "Terminal 2 is now on the 'browser' cluster. The panel shows the workspace change."
+pause
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACT 3: Cluster operations
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "Cluster selection" \
+  "Select a cluster to target it for operations."
+STATE="$(ctl ipc get-state)"
+FIRST_CLUSTER="$(echo "${STATE}" | jq '.clusters[0].id')"
+ctl ipc select-cluster "${FIRST_CLUSTER}" >/dev/null
+pause
+
+narrate "Keyboard move mode" \
+  "Mod+Shift+M enters move mode. Arrow keys reposition the cluster on the canvas."
+ctl ipc enter-keyboard-move-mode "${FIRST_CLUSTER}" >/dev/null
+pause 1.5
+
+narrate "Moving cluster right..."
+for _ in 1 2 3; do
+  ctl ipc keyboard-move-by --dx 96 --dy 0 >/dev/null
+  sleep 0.3
+done
+pause 1
+
+narrate "Moving cluster down..."
+for _ in 1 2 3; do
+  ctl ipc keyboard-move-by --dx 0 --dy 96 >/dev/null
+  sleep 0.3
+done
+pause 1
+
+narrate "Committing the move" \
+  "Mod+Shift+Return commits. Mod+Shift+Escape would cancel and revert."
+ctl ipc commit-keyboard-move >/dev/null
+pause
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACT 4: Zoom levels
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "Zoom levels" \
+  "vibeshell has three zoom levels: Overview, Cluster, and Focus."
+pause
+
+STATE="$(ctl ipc get-state)"
+ZOOM="$(echo "${STATE}" | jq -r '.zoom.kind // .zoom')"
+narrate "Current zoom: ${ZOOM}" \
+  "Mod+= zooms in one level. Mod+- zooms out."
+pause
+
+narrate "Zooming in..."
+ctl ipc zoom-in-mode >/dev/null
+pause 2
+
+STATE="$(ctl ipc get-state)"
+ZOOM="$(echo "${STATE}" | jq -r '.zoom.kind // .zoom')"
+narrate "Zoom level: ${ZOOM}" \
+  "Cluster view focuses on a single workspace's windows."
+pause
+
+narrate "Zooming in further..."
+ctl ipc zoom-in-mode >/dev/null
+pause 2
+
+STATE="$(ctl ipc get-state)"
+ZOOM="$(echo "${STATE}" | jq -r '.zoom.kind // .zoom')"
+narrate "Zoom level: ${ZOOM}" \
+  "Focus view targets a single window."
+pause
+
+narrate "Zooming back to overview..."
+ctl ipc zoom-out-mode >/dev/null
+pause 1
+ctl ipc zoom-out-mode >/dev/null
+pause
+
+STATE="$(ctl ipc get-state)"
+ZOOM="$(echo "${STATE}" | jq -r '.zoom.kind // .zoom')"
+narrate "Back to ${ZOOM}" \
+  "Overview shows all clusters on the 2D canvas."
+pause
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACT 5: Notifications
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "Notifications" \
+  "vibeshell includes notifd — a DBus notification daemon."
+pause
+
+notify-send -a "Calendar" "Meeting in 15 minutes" "Standup with the team" 2>/dev/null || true
+pause
+
+notify-send -a "System" "Update available" "3 packages ready to install" 2>/dev/null || true
+pause
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACT 6: Launcher
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "App launcher" \
+  "Mod+Space toggles the launcher with fuzzy search and usage-ranked results."
+pause
+
+# Start launcher, let it show briefly, then dismiss.
+"${TARGET_DIR}/launcher" &>/dev/null &
+LAUNCHER_PID=$!
+COMPONENT_PIDS+=("${LAUNCHER_PID}")
+pause 3
+
+smsg '[app_id="com.vibeshell.launcher"] kill' || true
+pause 1
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACT 7: Multi-workspace workflow
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "Multi-workspace workflow" \
+  "Let's set up a realistic workspace layout."
+pause
+
+# Create a few more windows across workspaces.
+smsg workspace 1
+pause 0.5
+smsg exec "foot --app-id=demo-editor -e bash -c 'echo \"=== Code Editor ===\"; sleep 300'"
+pause 1.5
+
+smsg workspace browser
+pause 0.5
+smsg exec "foot --app-id=demo-browser -e bash -c 'echo \"=== Web Browser ===\"; sleep 300'"
+pause 1.5
+
+ctl ipc create-cluster chat 800 0 >/dev/null
+smsg workspace chat
+pause 0.5
+smsg exec "foot --app-id=demo-chat -e bash -c 'echo \"=== Chat ===\"; sleep 300'"
+pause 1.5
+
+narrate "Three clusters active" \
+  "Workspace 1 (code), browser, chat — each a cluster on the canvas."
+pause
+
+# Cycle between them.
+narrate "Cluster cycling" \
+  "Mod+Tab / Mod+Shift+Tab cycles clusters in MRU order."
+pause
+
+smsg workspace 1
+pause 2
+smsg workspace browser
+pause 2
+smsg workspace chat
+pause 2
+smsg workspace 1
+pause
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACT 8: State inspection
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "State inspection" \
+  "'vibeshellctl ipc get-state' returns the full canvas state as JSON."
+pause
+
+STATE="$(ctl ipc get-state)"
+CLUSTER_COUNT="$(echo "${STATE}" | jq '.clusters | length')"
+WINDOW_COUNT="$(echo "${STATE}" | jq '.windows | length')"
+narrate "Canvas state" \
+  "${CLUSTER_COUNT} clusters, ${WINDOW_COUNT} windows on the canvas."
+pause
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACT 9: Config reload
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "Live config reload" \
+  "'vibeshellctl reload' sends SIGHUP to all components — no restart needed."
+pause
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Finale
+# ══════════════════════════════════════════════════════════════════════════════
+
+narrate "That's vibeshell!" \
+  "A cluster-based Wayland shell for Sway. See ROADMAP.md for what's next."
+pause
+
+narrate "Demo complete" \
+  "The session will close in a few seconds."
+pause 3
+
+echo ""
+echo "[demo] Done."
