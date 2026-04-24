@@ -329,10 +329,7 @@ impl StateOwner {
                 .keyboard_move_origin
                 .map(|(id, _, _)| id)
                 .or(self.drag_origin.map(|(id, _, _)| id));
-            persisted.merge_into_live_canvas_excluding(
-                &mut self.canvas_state,
-                in_flight_cluster,
-            );
+            persisted.merge_into_live_canvas_excluding(&mut self.canvas_state, in_flight_cluster);
         }
         self.apply_assignment_hints();
         if self.auto_cluster {
