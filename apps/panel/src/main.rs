@@ -11,6 +11,7 @@ mod status;
 use adw::prelude::*;
 use chrono::Local;
 use config::{CommandsConfig, Config, PanelConfig};
+use gtk::gdk;
 use gtk::glib;
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
@@ -120,9 +121,16 @@ fn build_ui(
         );
     }
 
-    let workspaces = gtk::Label::new(Some(""));
-    workspaces.set_halign(gtk::Align::Start);
-    workspaces.set_margin_start(panel_config.margin_start);
+    // Workspace indicators: one GtkButton per workspace, rebuilt from the
+    // PanelState snapshot whenever Sway emits a workspace event. Left-click
+    // switches to the workspace; right-click moves the focused window there.
+    let workspaces = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(4)
+        .halign(gtk::Align::Start)
+        .margin_start(panel_config.margin_start)
+        .build();
+    workspaces.add_css_class("vibeshell-workspaces");
 
     let title = gtk::Label::new(Some(""));
     title.set_halign(gtk::Align::Center);
@@ -447,38 +455,89 @@ fn run_configured_command(command: &str, action: &str) {
     }
 }
 
-fn apply_state(workspaces_label: &gtk::Label, title_label: &gtk::Label, state: &PanelState) {
-    workspaces_label.set_text(&format_workspaces(&state.workspaces));
+fn apply_state(workspaces_box: &gtk::Box, title_label: &gtk::Label, state: &PanelState) {
+    rebuild_workspace_buttons(workspaces_box, &state.workspaces);
     title_label.set_text(state.focused_title.as_deref().unwrap_or(""));
 }
 
-fn format_workspaces(workspaces: &[WorkspaceState]) -> String {
-    if workspaces.is_empty() {
-        return "no workspaces".to_owned();
+fn rebuild_workspace_buttons(container: &gtk::Box, workspaces: &[WorkspaceState]) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
     }
 
-    workspaces
-        .iter()
-        .map(|workspace| {
-            let display_name = workspace
-                .num
-                .filter(|num| *num > 0)
-                .map(|num| num.to_string())
-                .unwrap_or_else(|| workspace.name.clone());
+    if workspaces.is_empty() {
+        let placeholder = gtk::Label::new(Some("no workspaces"));
+        placeholder.add_css_class("dim-label");
+        container.append(&placeholder);
+        return;
+    }
 
-            let status = if workspace.focused {
-                '●'
-            } else if workspace.visible {
-                '◉'
-            } else {
-                '○'
-            };
+    for workspace in workspaces {
+        let button = gtk::Button::with_label(&format_workspace_label(workspace));
+        button.add_css_class("flat");
+        button.add_css_class("vibeshell-workspace-button");
+        if workspace.focused {
+            button.add_css_class("workspace-focused");
+        } else if workspace.visible {
+            button.add_css_class("workspace-visible");
+        }
+        if workspace.urgent {
+            button.add_css_class("workspace-urgent");
+        }
 
-            let urgent = if workspace.urgent { "!" } else { "" };
-            format!("{status}{display_name}{urgent}")
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+        let target_name = workspace.name.clone();
+        button.connect_clicked(move |_| {
+            switch_to_workspace(&target_name);
+        });
+
+        let right_click = gtk::GestureClick::new();
+        right_click.set_button(gdk::BUTTON_SECONDARY);
+        let target_for_move = workspace.name.clone();
+        right_click.connect_released(move |_, _, _, _| {
+            move_focused_window_to_workspace(&target_for_move);
+        });
+        button.add_controller(right_click);
+
+        container.append(&button);
+    }
+}
+
+/// Text content for a single workspace button. Used for rendering and to keep
+/// the glyph logic testable without a GTK context.
+fn format_workspace_label(workspace: &WorkspaceState) -> String {
+    let display_name = workspace
+        .num
+        .filter(|num| *num > 0)
+        .map(|num| num.to_string())
+        .unwrap_or_else(|| workspace.name.clone());
+
+    let status = if workspace.focused {
+        '●'
+    } else if workspace.visible {
+        '◉'
+    } else {
+        '○'
+    };
+
+    let urgent = if workspace.urgent { "!" } else { "" };
+    format!("{status}{display_name}{urgent}")
+}
+
+fn switch_to_workspace(name: &str) {
+    if let Err(error) = Command::new("swaymsg").args(["workspace", name]).spawn() {
+        tracing::warn!(?error, workspace = name, "failed to switch workspace");
+    }
+}
+
+fn move_focused_window_to_workspace(name: &str) {
+    let argument = format!("move container to workspace {name}");
+    if let Err(error) = Command::new("swaymsg").arg(&argument).spawn() {
+        tracing::warn!(
+            ?error,
+            workspace = name,
+            "failed to move focused window to workspace"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -504,49 +563,42 @@ mod tests {
     }
 
     #[test]
-    fn empty_workspaces_renders_placeholder() {
-        assert_eq!(format_workspaces(&[]), "no workspaces");
-    }
-
-    #[test]
     fn focused_workspace_uses_filled_dot() {
-        let out = format_workspaces(&[ws(Some(1), "1", true, true, false)]);
+        let out = format_workspace_label(&ws(Some(1), "1", true, true, false));
         assert!(out.starts_with('●'), "got {out}");
     }
 
     #[test]
     fn visible_but_unfocused_uses_ringed_dot() {
-        let out = format_workspaces(&[ws(Some(2), "2", false, true, false)]);
+        let out = format_workspace_label(&ws(Some(2), "2", false, true, false));
         assert!(out.starts_with('◉'), "got {out}");
     }
 
     #[test]
     fn hidden_workspace_uses_hollow_dot() {
-        let out = format_workspaces(&[ws(Some(3), "3", false, false, false)]);
+        let out = format_workspace_label(&ws(Some(3), "3", false, false, false));
         assert!(out.starts_with('○'), "got {out}");
     }
 
     #[test]
     fn urgent_workspace_gets_bang_suffix() {
-        let out = format_workspaces(&[ws(Some(4), "4", false, false, true)]);
+        let out = format_workspace_label(&ws(Some(4), "4", false, false, true));
         assert!(out.ends_with('!'), "got {out}");
     }
 
     #[test]
     fn named_workspace_without_number_uses_name() {
         // num is None (or <=0) → fall back to the workspace's name.
-        let out = format_workspaces(&[ws(None, "web", false, false, false)]);
+        let out = format_workspace_label(&ws(None, "web", false, false, false));
         assert!(out.contains("web"), "got {out}");
     }
 
     #[test]
-    fn multiple_workspaces_space_separated() {
-        let out = format_workspaces(&[
-            ws(Some(1), "1", true, true, false),
-            ws(Some(2), "2", false, false, false),
-        ]);
-        assert!(out.contains(' '), "got {out}");
-        let parts: Vec<&str> = out.split(' ').collect();
-        assert_eq!(parts.len(), 2);
+    fn numeric_workspace_displays_number_not_name() {
+        // When a workspace has num=2, the label should show "2", not
+        // whatever Sway set name to (often "2" but sometimes "2:label").
+        let out = format_workspace_label(&ws(Some(2), "2:web", false, false, false));
+        assert!(out.contains('2'), "got {out}");
+        assert!(!out.contains("web"), "got {out}");
     }
 }
