@@ -34,13 +34,16 @@ smoke-binaries:
     cargo build -p notifd --bins
     cargo build -p vibeshellctl --bins
 
+test:
+    cargo test --workspace
+
 smoke-test:
     ./scripts/smoke-test
 
 demo:
     ./scripts/demo
 
-ci: fmt-check clippy check smoke-binaries
+ci: fmt-check clippy check test smoke-binaries
 
 run-ctl *args:
     cargo run -p vibeshellctl -- {{args}}

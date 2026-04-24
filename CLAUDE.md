@@ -11,8 +11,9 @@ just fmt           # Format code
 just fmt-check     # Check formatting (CI)
 just clippy        # Run strict linter
 just check         # Cargo check without building
+just test          # Run all unit tests (cargo test --workspace)
 just smoke-binaries # Build all app binaries
-just ci            # Full CI suite (fmt-check + clippy + check + smoke-binaries)
+just ci            # Full CI suite (fmt-check + clippy + check + test + smoke-binaries)
 just smoke-test    # Headless integration test (starts Sway, daemon, exercises IPC)
 ```
 
@@ -25,7 +26,11 @@ just run-notifd         # Run notifd standalone
 just run-ctl [args]     # Run vibeshellctl CLI
 ```
 
-There are no automated tests in this project. CI validates via `just ci`.
+Unit tests live alongside their modules in each crate and app; `just test` runs
+the full workspace suite (~57 tests as of 2026-04). `just smoke-test` runs a
+headless integration check that boots Sway + daemon + panel and exercises IPC
+(config reload, cluster create, keyboard move, etc.). Both are included in
+`just ci`.
 
 Logging is controlled by `VIBESHELL_LOG=<level>` (falls back to `RUST_LOG`; default: `info`).
 
