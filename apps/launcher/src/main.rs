@@ -846,3 +846,172 @@ fn spawn_sway_dependency_probe() {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::contracts::{
+        CanvasState, Cluster, OutputState, Viewport, Window, WindowRole, WindowState,
+    };
+    use std::collections::HashMap;
+
+    fn fixture_canvas() -> CanvasState {
+        CanvasState {
+            state_revision: 1,
+            zoom: Default::default(),
+            viewport: Viewport::default(),
+            output_viewports: HashMap::new(),
+            clusters: vec![
+                Cluster {
+                    id: 1,
+                    name: "web".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    enabled: true,
+                    windows: vec![101, 102],
+                    last_focus: Some(101),
+                    recency: vec![101, 102],
+                },
+                Cluster {
+                    id: 2,
+                    name: "terminals".into(),
+                    x: 200.0,
+                    y: 0.0,
+                    enabled: true,
+                    windows: vec![201],
+                    last_focus: Some(201),
+                    recency: vec![201],
+                },
+            ],
+            windows: vec![
+                Window {
+                    id: 101,
+                    title: "My personal Firefox window".into(),
+                    app_id: Some("firefox".into()),
+                    cluster_id: Some(1),
+                    role: WindowRole::Normal,
+                    state: WindowState::Tiled,
+                    ..Default::default()
+                },
+                Window {
+                    id: 102,
+                    title: "GitHub — Firefox".into(),
+                    app_id: Some("firefox".into()),
+                    cluster_id: Some(1),
+                    role: WindowRole::Normal,
+                    state: WindowState::Tiled,
+                    ..Default::default()
+                },
+                Window {
+                    id: 201,
+                    title: "zsh".into(),
+                    app_id: Some("foot".into()),
+                    cluster_id: Some(2),
+                    role: WindowRole::Normal,
+                    state: WindowState::Tiled,
+                    ..Default::default()
+                },
+                Window {
+                    id: 999,
+                    title: "orphan pane".into(),
+                    app_id: Some("code".into()),
+                    cluster_id: None,
+                    role: WindowRole::Normal,
+                    state: WindowState::Tiled,
+                    ..Default::default()
+                },
+            ],
+            output: OutputState::default(),
+        }
+    }
+
+    #[test]
+    fn empty_query_returns_no_results() {
+        let canvas = fixture_canvas();
+        assert!(search_windows_and_clusters(&canvas, "", 10).is_empty());
+    }
+
+    #[test]
+    fn app_id_prefix_match_outranks_title_substring() {
+        // query "fire" — matches app_id "firefox" as prefix (highest tier)
+        // and title "My personal Firefox window" as substring (middle tier).
+        // Both rank together; app_id-prefix scores higher.
+        let canvas = fixture_canvas();
+        let results = search_windows_and_clusters(&canvas, "fire", 10);
+
+        assert!(!results.is_empty());
+        // Top result must be a Window scored at MATCH_EXACT_PREFIX tier.
+        let top_score = results[0].score();
+        assert_eq!(top_score, MATCH_EXACT_PREFIX * 10_000);
+    }
+
+    #[test]
+    fn title_substring_match_returns_hit() {
+        let canvas = fixture_canvas();
+        let results = search_windows_and_clusters(&canvas, "github", 10);
+
+        assert!(results.iter().any(|r| matches!(
+            r,
+            SearchResult::Window { title, .. } if title.contains("GitHub")
+        )));
+    }
+
+    #[test]
+    fn cluster_name_prefix_match_is_returned() {
+        let canvas = fixture_canvas();
+        let results = search_windows_and_clusters(&canvas, "term", 10);
+
+        assert!(results.iter().any(|r| matches!(
+            r,
+            SearchResult::Cluster { name, .. } if name == "terminals"
+        )));
+    }
+
+    #[test]
+    fn window_without_cluster_labeled_unassigned() {
+        let canvas = fixture_canvas();
+        // "orphan" matches the title of window 999, which has cluster_id = None.
+        let results = search_windows_and_clusters(&canvas, "orphan", 10);
+
+        let hit = results
+            .iter()
+            .find(|r| matches!(r, SearchResult::Window { window_id: 999, .. }))
+            .expect("orphan window should match");
+        match hit {
+            SearchResult::Window { cluster_name, .. } => {
+                assert_eq!(cluster_name, "unassigned");
+            }
+            _ => panic!("expected Window variant"),
+        }
+    }
+
+    #[test]
+    fn results_truncated_to_max_results() {
+        let canvas = fixture_canvas();
+        // query "e" matches broadly (personal, firefox, zsh, orphan, terminals, web).
+        let results = search_windows_and_clusters(&canvas, "e", 2);
+        assert!(results.len() <= 2);
+    }
+
+    #[test]
+    fn results_sorted_by_score_descending() {
+        let canvas = fixture_canvas();
+        let results = search_windows_and_clusters(&canvas, "f", 10);
+
+        for pair in results.windows(2) {
+            assert!(
+                pair[0].score() >= pair[1].score(),
+                "results not sorted descending: {} then {}",
+                pair[0].score(),
+                pair[1].score()
+            );
+        }
+    }
+
+    #[test]
+    fn non_matching_query_returns_empty() {
+        let canvas = fixture_canvas();
+        let results = search_windows_and_clusters(&canvas, "qzzzzx", 10);
+        assert!(results.is_empty());
+    }
+}

@@ -480,3 +480,73 @@ fn format_workspaces(workspaces: &[WorkspaceState]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws(
+        num: Option<i32>,
+        name: &str,
+        focused: bool,
+        visible: bool,
+        urgent: bool,
+    ) -> WorkspaceState {
+        WorkspaceState {
+            id: 0,
+            num,
+            name: name.to_owned(),
+            output: "DP-1".to_owned(),
+            focused,
+            visible,
+            urgent,
+        }
+    }
+
+    #[test]
+    fn empty_workspaces_renders_placeholder() {
+        assert_eq!(format_workspaces(&[]), "no workspaces");
+    }
+
+    #[test]
+    fn focused_workspace_uses_filled_dot() {
+        let out = format_workspaces(&[ws(Some(1), "1", true, true, false)]);
+        assert!(out.starts_with('●'), "got {out}");
+    }
+
+    #[test]
+    fn visible_but_unfocused_uses_ringed_dot() {
+        let out = format_workspaces(&[ws(Some(2), "2", false, true, false)]);
+        assert!(out.starts_with('◉'), "got {out}");
+    }
+
+    #[test]
+    fn hidden_workspace_uses_hollow_dot() {
+        let out = format_workspaces(&[ws(Some(3), "3", false, false, false)]);
+        assert!(out.starts_with('○'), "got {out}");
+    }
+
+    #[test]
+    fn urgent_workspace_gets_bang_suffix() {
+        let out = format_workspaces(&[ws(Some(4), "4", false, false, true)]);
+        assert!(out.ends_with('!'), "got {out}");
+    }
+
+    #[test]
+    fn named_workspace_without_number_uses_name() {
+        // num is None (or <=0) → fall back to the workspace's name.
+        let out = format_workspaces(&[ws(None, "web", false, false, false)]);
+        assert!(out.contains("web"), "got {out}");
+    }
+
+    #[test]
+    fn multiple_workspaces_space_separated() {
+        let out = format_workspaces(&[
+            ws(Some(1), "1", true, true, false),
+            ws(Some(2), "2", false, false, false),
+        ]);
+        assert!(out.contains(' '), "got {out}");
+        let parts: Vec<&str> = out.split(' ').collect();
+        assert_eq!(parts.len(), 2);
+    }
+}

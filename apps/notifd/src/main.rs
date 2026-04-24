@@ -666,3 +666,66 @@ fn timeout_from_request(
         Urgency::Normal => Some(default_timeout_ms),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_actions_pairs_keys_and_labels() {
+        let input = vec![
+            "ok".to_owned(),
+            "Accept".to_owned(),
+            "cancel".to_owned(),
+            "Dismiss".to_owned(),
+        ];
+        let parsed = parse_actions(input);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].key, "ok");
+        assert_eq!(parsed[0].label, "Accept");
+        assert_eq!(parsed[1].key, "cancel");
+        assert_eq!(parsed[1].label, "Dismiss");
+    }
+
+    #[test]
+    fn parse_actions_drops_unpaired_tail() {
+        // chunks_exact discards an odd trailing entry — documented DBus
+        // behavior: spec requires even-count arrays.
+        let input = vec!["ok".to_owned(), "Accept".to_owned(), "stray".to_owned()];
+        let parsed = parse_actions(input);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].key, "ok");
+    }
+
+    #[test]
+    fn parse_actions_empty_input_yields_empty_vec() {
+        assert!(parse_actions(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn explicit_positive_timeout_overrides_config_default() {
+        let out = timeout_from_request(3_000, 5_000, Urgency::Normal);
+        assert_eq!(out, Some(3_000));
+    }
+
+    #[test]
+    fn explicit_zero_timeout_means_never_expire() {
+        // DBus convention: 0 = sticky notification.
+        let out = timeout_from_request(0, 5_000, Urgency::Normal);
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn negative_timeout_uses_default_for_normal_urgency() {
+        let out = timeout_from_request(-1, 5_000, Urgency::Normal);
+        assert_eq!(out, Some(5_000));
+    }
+
+    #[test]
+    fn negative_timeout_never_expires_for_critical_urgency() {
+        // Critical notifications stick until the user dismisses them, even
+        // when the caller didn't specify a timeout.
+        let out = timeout_from_request(-1, 5_000, Urgency::Critical);
+        assert_eq!(out, None);
+    }
+}
