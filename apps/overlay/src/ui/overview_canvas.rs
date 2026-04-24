@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use common::contracts::{CanvasState, Cluster, ClusterId, Viewport, Window};
+use common::contracts::{CanvasState, Cluster, ClusterId, Viewport, Window, ZoomLevel};
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
@@ -997,6 +997,87 @@ fn draw_canvas(state: &WidgetState, cr: &gtk::cairo::Context, width: f64, height
     for cluster in &state.canvas_state.clusters {
         draw_cluster_card(state, cr, width, height, cluster, &windows_by_id);
     }
+
+    draw_zoom_pill(cr, &state.canvas_state, &windows_by_id);
+}
+
+/// Top-left pill showing the current `ZoomLevel`: `Overview`,
+/// `Cluster: <name>`, or `Focus: <title>`. Long titles are truncated.
+fn draw_zoom_pill(
+    cr: &gtk::cairo::Context,
+    canvas_state: &CanvasState,
+    windows_by_id: &HashMap<u64, &Window>,
+) {
+    const MAX_TITLE_CHARS: usize = 48;
+    const PILL_MARGIN: f64 = 16.0;
+    const PILL_PAD_X: f64 = 14.0;
+    const PILL_PAD_Y: f64 = 8.0;
+    const PILL_FONT: f64 = 13.0;
+
+    let text = match &canvas_state.zoom {
+        ZoomLevel::Overview => "Overview".to_owned(),
+        ZoomLevel::Cluster(id) => {
+            let name = canvas_state
+                .clusters
+                .iter()
+                .find(|c| c.id == *id)
+                .map(|c| c.name.as_str())
+                .unwrap_or("?");
+            format!("Cluster: {name}")
+        }
+        ZoomLevel::Focus(window_id) => {
+            let (title, app_id) = windows_by_id
+                .get(window_id)
+                .map(|w| {
+                    let title = if w.title.trim().is_empty() {
+                        "untitled"
+                    } else {
+                        w.title.as_str()
+                    };
+                    (title, w.app_id.as_deref().unwrap_or("unknown"))
+                })
+                .unwrap_or(("?", "?"));
+            let truncated = truncate_display(title, MAX_TITLE_CHARS);
+            format!("Focus: {truncated} — {app_id}")
+        }
+    };
+
+    cr.select_font_face(
+        "Sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(PILL_FONT);
+    let extents = match cr.text_extents(&text) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let pill_w = extents.width() + PILL_PAD_X * 2.0;
+    let pill_h = PILL_FONT + PILL_PAD_Y * 2.0;
+    let pill_x = PILL_MARGIN;
+    let pill_y = PILL_MARGIN;
+
+    cr.set_source_rgba(0.10, 0.11, 0.13, 0.85);
+    cr.rectangle(pill_x, pill_y, pill_w, pill_h);
+    let _ = cr.fill();
+
+    cr.set_source_rgba(0.35, 0.62, 1.0, 0.55);
+    cr.set_line_width(1.0);
+    cr.rectangle(pill_x, pill_y, pill_w, pill_h);
+    let _ = cr.stroke();
+
+    cr.set_source_rgb(0.92, 0.94, 0.97);
+    cr.move_to(pill_x + PILL_PAD_X, pill_y + PILL_PAD_Y + PILL_FONT - 3.0);
+    let _ = cr.show_text(&text);
+}
+
+fn truncate_display(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_owned();
+    }
+    let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{truncated}…")
 }
 
 fn draw_cluster_card(
@@ -1297,4 +1378,39 @@ fn start_inertia(area: &gtk::DrawingArea, data: Rc<RefCell<WidgetState>>) {
         area.queue_draw();
         glib::ControlFlow::Continue
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_display_leaves_short_strings_untouched() {
+        assert_eq!(truncate_display("hi", 10), "hi");
+        assert_eq!(truncate_display("", 10), "");
+    }
+
+    #[test]
+    fn truncate_display_replaces_tail_with_ellipsis() {
+        let out = truncate_display("abcdefghijklmno", 6);
+        assert_eq!(out, "abcde…");
+        // max_chars includes the ellipsis, so the final string is exactly max.
+        assert_eq!(out.chars().count(), 6);
+    }
+
+    #[test]
+    fn truncate_display_counts_characters_not_bytes() {
+        // Unicode scalar count, not byte length — "é" is 2 bytes but 1 char.
+        let input = "ééééééééé"; // 9 chars, 18 bytes
+        let out = truncate_display(input, 5);
+        assert_eq!(out.chars().count(), 5);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_display_max_one_avoids_panic() {
+        // max_chars = 1 would call `take(0)` — must not panic, just ellipsis.
+        let out = truncate_display("abcdef", 1);
+        assert_eq!(out, "…");
+    }
 }
