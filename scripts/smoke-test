@@ -162,13 +162,25 @@ fi
 
 # ── Start daemon ─────────────────────────────────────────────────────────────
 
+# Spawns the daemon with scratch-isolated XDG dirs and waits for its socket.
+# Returns (via $REPLY) the pid of the newly spawned daemon.
+# XDG_STATE_HOME isolation is important: persistence goes to
+# $XDG_STATE_HOME/vibeshell/overview-state.json — without the override it
+# would clobber the developer's real session state.
+start_daemon() {
+  rm -f "${DAEMON_SOCKET}"
+  XDG_RUNTIME_DIR="${SCRATCH_DIR}" \
+  XDG_CONFIG_HOME="${SCRATCH_DIR}/xdg-config" \
+  XDG_STATE_HOME="${SCRATCH_DIR}/xdg-state" \
+    "${TARGET_DIR}/vibeshellctl" daemon &>>"${DAEMON_LOG}" &
+  REPLY=$!
+  wait_for "daemon socket" "[[ -e ${DAEMON_SOCKET} ]]" 10 || return 1
+}
+
 section "Daemon"
 
-XDG_RUNTIME_DIR="${SCRATCH_DIR}" XDG_CONFIG_HOME="${SCRATCH_DIR}/xdg-config" \
-  "${TARGET_DIR}/vibeshellctl" daemon &>"${DAEMON_LOG}" &
-DAEMON_PID=$!
-
-wait_for "daemon socket" "[[ -e ${SCRATCH_DIR}/vibeshell-daemon.sock ]]" 10 || exit 1
+start_daemon || exit 1
+DAEMON_PID="${REPLY}"
 
 if kill -0 "${DAEMON_PID}" 2>/dev/null; then
   pass "Daemon started (pid=${DAEMON_PID})"
@@ -434,6 +446,74 @@ if echo "${RELOAD_TAIL}" | grep -E "reloaded config.*hints=1" >/dev/null; then
   pass "Reload picked up 1 assignment hint from new config"
 else
   fail "Reload did not pick up the assignment hint"
+fi
+
+# ── Test: Daemon crash → restart → state restoration ─────────────────────────
+# SIGKILLs the daemon (no graceful shutdown, no final persist), spawns a
+# replacement with the same XDG env, and verifies cluster positions persisted
+# via debounced writes survive the crash. This is the contract behind the
+# start-sway-session supervisor's DAEMON_ALWAYS_RESTART default.
+
+section "Daemon crash recovery"
+
+# Find a cluster to track. Nudge it by a distinctive delta and commit.
+# keyboard-move-by is cumulative, so we just capture the resulting position
+# rather than asserting an absolute value.
+CRASH_CLUSTER_ID="$(ctl ipc get-state 2>/dev/null | jq '.clusters[0].id')"
+
+ctl ipc enter-keyboard-move-mode "${CRASH_CLUSTER_ID}" >/dev/null 2>&1
+ctl ipc keyboard-move-by --dx 4242 --dy 1717 >/dev/null 2>&1
+ctl ipc commit-keyboard-move >/dev/null 2>&1
+
+STATE_BEFORE="$(ctl ipc get-state 2>/dev/null)"
+X_BEFORE="$(echo "${STATE_BEFORE}" | jq "[.clusters[] | select(.id == ${CRASH_CLUSTER_ID})] | first | .x")"
+Y_BEFORE="$(echo "${STATE_BEFORE}" | jq "[.clusters[] | select(.id == ${CRASH_CLUSTER_ID})] | first | .y")"
+
+# Persistence is debounced at 250 ms; commit calls persist_immediate so the
+# write should be on disk already, but wait a beat to be safe on slow CI.
+sleep 0.5
+
+PERSIST_FILE="${SCRATCH_DIR}/xdg-state/vibeshell/overview-state.json"
+if [[ -s "${PERSIST_FILE}" ]]; then
+  pass "Persistence file written to ${PERSIST_FILE#${SCRATCH_DIR}/}"
+else
+  fail "Expected persistence file at ${PERSIST_FILE} after commit"
+fi
+
+# Hard-kill the daemon — no SIGTERM, no cleanup.
+kill -KILL "${DAEMON_PID}"
+wait "${DAEMON_PID}" 2>/dev/null || true
+sleep 0.2
+
+if ! kill -0 "${DAEMON_PID}" 2>/dev/null; then
+  pass "Daemon killed (pid=${DAEMON_PID} gone)"
+else
+  fail "Daemon pid ${DAEMON_PID} still alive after SIGKILL"
+fi
+
+# Spawn a replacement.
+start_daemon || fail "Replacement daemon failed to start"
+DAEMON_PID="${REPLY}"
+pass "Replacement daemon started (pid=${DAEMON_PID})"
+
+STATE_AFTER="$(ctl ipc get-state 2>/dev/null)"
+# After the new daemon's initial ingest, Sway's tree repopulates window/cluster
+# state; the cluster id may change across daemons (sway workspace id vs our
+# allocator), but the cluster *name* and its persisted position should survive.
+CRASH_CLUSTER_NAME="$(echo "${STATE_BEFORE}" | jq -r "[.clusters[] | select(.id == ${CRASH_CLUSTER_ID})] | first | .name")"
+X_AFTER="$(echo "${STATE_AFTER}" | jq ".clusters[] | select(.name == \"${CRASH_CLUSTER_NAME}\") | .x" | head -1)"
+Y_AFTER="$(echo "${STATE_AFTER}" | jq ".clusters[] | select(.name == \"${CRASH_CLUSTER_NAME}\") | .y" | head -1)"
+
+if [[ -n "${X_AFTER}" && -n "${Y_AFTER}" ]]; then
+  X_MATCH="$(jq -n "(${X_AFTER} - (${X_BEFORE})) | fabs < 1")"
+  Y_MATCH="$(jq -n "(${Y_AFTER} - (${Y_BEFORE})) | fabs < 1")"
+  if [[ "${X_MATCH}" == "true" && "${Y_MATCH}" == "true" ]]; then
+    pass "Cluster position survived restart: (${X_AFTER},${Y_AFTER})"
+  else
+    fail "Position drifted across restart: before (${X_BEFORE},${Y_BEFORE}) vs after (${X_AFTER},${Y_AFTER})"
+  fi
+else
+  fail "Cluster '${CRASH_CLUSTER_NAME}' not present after restart"
 fi
 
 # ── Test: Panel starts ───────────────────────────────────────────────────────

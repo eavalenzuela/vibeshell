@@ -15,6 +15,13 @@ OVERLAY_CMD="${VIBESHELL_OVERLAY_CMD:-cargo run -p overlay}"
 DEV_RESTART_MODE="${VIBESHELL_DEV_RESTART_MODE:-0}"
 RESTART_BACKOFF_SECONDS="${VIBESHELL_DEV_RESTART_BACKOFF_SECONDS:-2}"
 MAX_RESTART_BACKOFF_SECONDS="${VIBESHELL_DEV_RESTART_MAX_BACKOFF_SECONDS:-15}"
+# Max restarts per component before giving up (crash-loop guard).
+MAX_RESTART_ATTEMPTS="${VIBESHELL_MAX_RESTART_ATTEMPTS:-5}"
+# The daemon is critical — without it, overlay/panel/launcher have no IPC.
+# Persistence ensures state survives restarts (cluster positions, viewport,
+# manual assignments), so restoring the daemon is cheap and correct.
+# Always-restart for the daemon, independent of DEV_RESTART_MODE.
+DAEMON_ALWAYS_RESTART="${VIBESHELL_DAEMON_ALWAYS_RESTART:-1}"
 
 SWAY_BINDINGS_OUTPUT="${VIBESHELL_SWAY_BINDINGS_OUTPUT:-${PROJECT_ROOT}/dev/sway.bindings.generated}"
 LAUNCHER_TOGGLE_KEY="${VIBESHELL_LAUNCHER_TOGGLE_KEY:-\$mod+space}"
@@ -196,21 +203,37 @@ monitor_components() {
 
         log ERROR "${name} exited unexpectedly with status=${status}"
 
-        if [[ "${DEV_RESTART_MODE}" == "1" && "${SHUTTING_DOWN}" == "0" ]]; then
+        # The daemon is always restarted (unless DAEMON_ALWAYS_RESTART=0)
+        # because overview state lives in it; losing it breaks every client.
+        # Other components only restart under DEV mode.
+        local should_restart=0
+        if [[ "${name}" == "daemon" && "${DAEMON_ALWAYS_RESTART}" == "1" ]]; then
+          should_restart=1
+        elif [[ "${DEV_RESTART_MODE}" == "1" ]]; then
+          should_restart=1
+        fi
+
+        if [[ "${should_restart}" == "1" && "${SHUTTING_DOWN}" == "0" ]]; then
           local next_attempt=$((restart_count + 1))
+
+          if (( next_attempt > MAX_RESTART_ATTEMPTS )); then
+            log ERROR "${name} exceeded MAX_RESTART_ATTEMPTS=${MAX_RESTART_ATTEMPTS}; giving up"
+            break
+          fi
+
           local backoff=$((RESTART_BACKOFF_SECONDS * next_attempt))
           if (( backoff > MAX_RESTART_BACKOFF_SECONDS )); then
             backoff="${MAX_RESTART_BACKOFF_SECONDS}"
           fi
 
-          log WARN "Restarting ${name} in ${backoff}s (attempt=${next_attempt})"
+          log WARN "Restarting ${name} in ${backoff}s (attempt=${next_attempt}/${MAX_RESTART_ATTEMPTS})"
           sleep "${backoff}"
 
           if [[ "${SHUTTING_DOWN}" == "0" ]]; then
             start_component "${name}" "${cmd}" "${next_attempt}"
           fi
         else
-          log WARN "${name} will not be restarted (VIBESHELL_DEV_RESTART_MODE=${DEV_RESTART_MODE})"
+          log WARN "${name} will not be restarted (DEV_RESTART_MODE=${DEV_RESTART_MODE}, DAEMON_ALWAYS_RESTART=${DAEMON_ALWAYS_RESTART})"
         fi
         break
       fi
