@@ -1,3 +1,62 @@
+//! Daemon-side state ownership for the Continuum canvas.
+//!
+//! The daemon owns a single `StateOwner` behind a `Mutex`. Every IPC request
+//! that reads or mutates state goes through [`with_state_owner`], so there is
+//! no shared mutable access outside that critical section. Interaction state
+//! is scattered across several fields; the invariants below cross-cut them and
+//! are *not* fully encoded in the types — respect them when adding mutations.
+//!
+//! # Interaction-mode invariants
+//!
+//! `drag_origin` and `keyboard_move_origin` each record an in-flight move for
+//! a single cluster as `(ClusterId, origin_x, origin_y)`, where the origin is
+//! the cluster's position at the moment the interaction began (used to
+//! restore on cancel). Both are `Option`-typed; `Some` means "interaction
+//! active."
+//!
+//! - **At most one is `Some` at any time.** The state machine supports pointer
+//!   drag OR keyboard move, not both. This is *not* enforced in the daemon —
+//!   neither `begin_cluster_drag` nor `enter_keyboard_move_mode` clears the
+//!   other field. Clients (the overlay) are responsible for never entering
+//!   one mode while the other is active. `merge_into_live_canvas_excluding`
+//!   only protects a single cluster (see [`Self::ingest_sway_facts`]), so
+//!   concurrent modes would leak persisted positions into the in-flight one.
+//!
+//! - **Every `Some` refers to a cluster that exists in `canvas_state.clusters`
+//!   at the moment it was written.** Clusters can be removed by Sway ingest
+//!   between writes and reads, so mutations that dereference the origin must
+//!   handle "cluster vanished" — see `update_cluster_drag` / `keyboard_move_by`
+//!   which short-circuit when the cluster isn't found.
+//!
+//! - **Commit persists, cancel restores.** `commit_*` paths call
+//!   `persist_immediate` + `update_boot_persisted`; `cancel_*` paths rewrite
+//!   the cluster's `x`/`y` from the stored origin before clearing it.
+//!
+//! # Sway-ingest conflict handling
+//!
+//! `ingest_sway_facts` rebuilds most of `canvas_state` from Sway's tree.
+//! To avoid clobbering local interaction state:
+//!
+//! - The previous `viewport` is preserved (line ~323), so a concurrent ingest
+//!   doesn't snap the overlay back to the origin.
+//! - The currently-dragging / keyboard-moving cluster is excluded from
+//!   `merge_into_live_canvas_excluding` so its in-flight `x`/`y` survive.
+//! - `cluster_history` (MRU for `CycleCluster`) is preserved across ingests.
+//!
+//! # Focus freeze
+//!
+//! `focus_freeze` pins focus to a specific window when the user explicitly
+//! zoomed to it (`SetFocusZoomTarget`). While frozen, deterministic focus
+//! plans skip the usual "refocus last-focused window in cluster" behavior.
+//! Cleared whenever the zoom level changes in a way that implies the user
+//! is navigating elsewhere (see `activate_cluster`, `zoom_out_mode`).
+//!
+//! # Revision counter
+//!
+//! `canvas_state.state_revision` bumps on every mutation via `bump_revision`.
+//! Clients read it off `GetState` responses; it's currently observational only
+//! (no optimistic-CAS is enforced by the daemon).
+
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
