@@ -449,6 +449,65 @@ mod tests {
     }
 
     #[test]
+    fn example_config_parses_and_matches_defaults() {
+        // examples/config.toml lives at the workspace root; CARGO_MANIFEST_DIR
+        // points at crates/config, so go up two levels.
+        let example_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("config.toml");
+        let content = fs::read_to_string(&example_path).expect("read examples/config.toml");
+        let parsed: Config = toml::from_str(&content).expect("parse examples/config.toml");
+
+        parsed
+            .validate(&example_path)
+            .expect("example config must pass validation");
+
+        // Every field the example writes should match the Default impl, so
+        // users who copy it see identical behavior to leaving the file absent.
+        let defaults = Config::default();
+        assert_eq!(parsed.config_version, defaults.config_version);
+        assert_eq!(parsed.panel.height, defaults.panel.height);
+        assert_eq!(parsed.panel.clock_format, defaults.panel.clock_format);
+        assert_eq!(
+            parsed.launcher.terminal_command,
+            defaults.launcher.terminal_command
+        );
+        assert_eq!(parsed.notifications.width, defaults.notifications.width);
+        assert_eq!(
+            parsed.keybindings.launcher_toggle,
+            defaults.keybindings.launcher_toggle
+        );
+        assert_eq!(parsed.commands.volume.up, defaults.commands.volume.up);
+        assert_eq!(
+            parsed.commands.brightness.up,
+            defaults.commands.brightness.up
+        );
+        assert_eq!(parsed.commands.power.menu, defaults.commands.power.menu);
+        assert_eq!(
+            parsed.continuum.clusters_enabled,
+            defaults.continuum.clusters_enabled
+        );
+        assert_eq!(
+            parsed.continuum.auto_cluster,
+            defaults.continuum.auto_cluster
+        );
+        assert_eq!(
+            parsed.continuum.strip_placement,
+            defaults.continuum.strip_placement
+        );
+        assert_eq!(
+            parsed.continuum.zoom_step_sizes.overview_to_cluster,
+            defaults.continuum.zoom_step_sizes.overview_to_cluster
+        );
+        assert_eq!(
+            parsed.continuum.zoom_step_sizes.keyboard_pan,
+            defaults.continuum.zoom_step_sizes.keyboard_pan
+        );
+    }
+
+    #[test]
     fn reports_field_level_validation_messages() {
         let cfg: Config = toml::from_str(
             r#"

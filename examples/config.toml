@@ -1,0 +1,115 @@
+# vibeshell configuration
+#
+# Copy this file to ~/.config/vibeshell/config.toml (or
+# $XDG_CONFIG_HOME/vibeshell/config.toml) and edit as needed.
+#
+# Every section and field is optional — defaults are applied when a field is
+# missing. The values shown below are the built-in defaults; delete anything
+# you're happy with.
+#
+# After editing, run `vibeshellctl reload` to pick up changes without
+# restarting (sends SIGHUP to every vibeshell component).
+
+config_version = 1
+
+
+# ── Top bar ────────────────────────────────────────────────────────────────
+[panel]
+height = 32
+margin_start = 12
+margin_end = 12
+
+# strftime format string for the clock widget.
+clock_format = "%H:%M"
+
+# How often the panel re-polls nmcli / wpctl for network and volume status.
+status_poll_interval_ms = 5000
+
+# Debounces Sway workspace/window events into at most one repaint per window.
+# Must be >= 20 ms.
+sway_event_debounce_ms = 80
+
+# Command launched when the user clicks the network indicator.
+network_settings_command = "nm-connection-editor"
+
+
+# ── App launcher ───────────────────────────────────────────────────────────
+[launcher]
+window_width = 640
+window_height = 420
+max_results = 10
+
+# Terminal emulator the launcher uses when spawning apps that need a TTY.
+terminal_command = "foot"
+
+
+# ── Notification daemon ────────────────────────────────────────────────────
+[notifications]
+width = 360
+default_timeout_ms = 5000
+margin_top = 12
+margin_right = 12
+
+
+# ── Keybindings ────────────────────────────────────────────────────────────
+# Sway-style binding strings. These are rendered into
+# `dev/sway.bindings.generated` by `generate-bindings` at session start.
+[keybindings]
+launcher_toggle = "Super+d"
+screenshot = "Print"
+volume_up = "XF86AudioRaiseVolume"
+volume_down = "XF86AudioLowerVolume"
+volume_mute_toggle = "XF86AudioMute"
+brightness_up = "XF86MonBrightnessUp"
+brightness_down = "XF86MonBrightnessDown"
+power_menu = "Super+Escape"
+
+
+# ── External commands ──────────────────────────────────────────────────────
+[commands.volume]
+up = "wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ 5%+"
+down = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
+toggle_mute = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+# Optional — command to launch a graphical mixer from the panel.
+# mixer = "pavucontrol"
+
+[commands.brightness]
+up = "brightnessctl set +5%"
+down = "brightnessctl set 5%-"
+
+[commands.power]
+menu = "wlogout"
+
+
+# ── Continuum WM (cluster-based window management) ─────────────────────────
+[continuum]
+# Master switch. Set to false to disable cluster UX entirely.
+clusters_enabled = true
+
+# Auto-assign new windows to the cluster whose name matches their app_id.
+# Existing windows with `manual_cluster_override = true` are left alone.
+auto_cluster = false
+
+# Where the in-cluster window strip is rendered.
+# Valid values: "left", "bottom" (default), "right", "hidden".
+strip_placement = "bottom"
+
+[continuum.zoom_step_sizes]
+# Scale step applied when entering/exiting overview zoom.
+overview_to_cluster = 0.15
+# Scale step applied when entering single-window focus.
+cluster_to_focus = 0.25
+# World-space distance moved by a single arrow-key pan in overview mode.
+keyboard_pan = 120.0
+
+# Windows can be routed into named clusters by app_id / WM_CLASS / title.
+# First matching hint wins; `cluster` is the cluster name (auto-created if
+# missing). Unset fields match everything.
+#
+# [[continuum.assignment_hints]]
+# app_id = "firefox"
+# cluster = "web"
+#
+# [[continuum.assignment_hints]]
+# title_contains = "Zoom Meeting"
+# cluster = "calls"

@@ -176,6 +176,26 @@ just run-notifd
 ---
 
 
+## Configuration
+
+Every component reads its settings from `$XDG_CONFIG_HOME/vibeshell/config.toml`
+(defaulting to `~/.config/vibeshell/config.toml`). The file is optional — every
+field has a sensible default, so vibeshell runs with no config at all.
+
+A heavily commented sample file lives at [`examples/config.toml`](examples/config.toml)
+with every section and default documented. To customize settings, copy it:
+
+```bash
+mkdir -p ~/.config/vibeshell
+cp examples/config.toml ~/.config/vibeshell/config.toml
+```
+
+After editing, run `vibeshellctl reload` to pick up changes without restarting —
+this sends `SIGHUP` to every vibeshell component.
+
+---
+
+
 ## Logging
 
 All apps (`panel`, `launcher`, and `notifd`) use shared logging setup from `crates/common`.
