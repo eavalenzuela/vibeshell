@@ -103,7 +103,6 @@ enum IpcCommands {
         cluster_id: u64,
         pointer_canvas_x: f64,
         pointer_canvas_y: f64,
-        base_revision: u64,
     },
     /// Update the dragged cluster's canvas position.
     UpdateClusterDrag { cluster_x: f64, cluster_y: f64 },
@@ -305,13 +304,11 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
             cluster_id,
             pointer_canvas_x,
             pointer_canvas_y,
-            base_revision,
         } => (
             IpcRequest::BeginClusterDrag {
                 cluster: cluster_id,
                 pointer_canvas_x,
                 pointer_canvas_y,
-                base_revision,
             },
             false,
         ),
@@ -1220,9 +1217,9 @@ fn log_ipc_request(
 
 fn log_ipc_response(response: &IpcResponse, module: &str, windows: usize, workspaces: usize) {
     let event_type = match response {
-        IpcResponse::Ack | IpcResponse::ClusterDragAck { .. } => "ack",
+        IpcResponse::Ack => "ack",
         IpcResponse::State(_) => "state",
-        IpcResponse::Error { .. } | IpcResponse::ClusterDragError { .. } => "error",
+        IpcResponse::Error { .. } => "error",
     };
 
     info!(

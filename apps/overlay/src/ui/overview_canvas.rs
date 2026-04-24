@@ -295,7 +295,6 @@ impl OverviewCanvas {
                             cluster: cluster_id,
                             pointer_canvas_x: start_canvas_x,
                             pointer_canvas_y: start_canvas_y,
-                            base_revision: state.canvas_state.state_revision,
                         });
                         let (cluster_x, cluster_y) =
                             apply_cluster_drag(&mut state, &area, cluster_id, dx, dy);

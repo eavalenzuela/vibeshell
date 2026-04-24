@@ -207,15 +207,13 @@ pub enum IpcRequest {
     SelectCluster {
         cluster: ClusterId,
     },
-    /// Start a pointer-drag session on a cluster. `base_revision` is intended
-    /// for optimistic-CAS (reject the drag if the daemon has advanced past it);
-    /// currently the daemon accepts all drags and replies with `Ack`, so the
-    /// field is reserved for future use — do not rely on it for correctness.
+    /// Start a pointer-drag session on a cluster. In-flight drags are protected
+    /// from concurrent `GetState` ingest by `drag_origin` excluding the dragged
+    /// cluster from Sway-fact merges (see `merge_into_live_canvas_excluding`).
     BeginClusterDrag {
         cluster: ClusterId,
         pointer_canvas_x: f64,
         pointer_canvas_y: f64,
-        base_revision: u64,
     },
     /// Move the currently-dragging cluster to the given world-space coords.
     /// Overlay throttles these to ~30 Hz and dispatches them detached.
@@ -309,17 +307,8 @@ pub enum CycleDirection {
 pub enum IpcResponse {
     /// Request accepted. Used for all mutations that don't return data.
     Ack,
-    /// Reserved for future optimistic-CAS drag acceptance. Not currently
-    /// emitted by the daemon — `BeginClusterDrag` returns `Ack` today.
-    ClusterDragAck { state_revision: u64 },
     /// Full canvas state, returned by `GetState`.
     State(CanvasState),
-    /// Reserved for future optimistic-CAS drag rejection (e.g. stale
-    /// `base_revision`). Not currently emitted.
-    ClusterDragError {
-        message: String,
-        state_revision: u64,
-    },
     /// Mutation failed; `message` is a human-readable reason. Some errors are
     /// structured JSON (see `state_store.rs` handlers).
     Error { message: String },
@@ -467,7 +456,6 @@ mod tests {
                 cluster: 7,
                 pointer_canvas_x: 123.0,
                 pointer_canvas_y: 456.0,
-                base_revision: 8,
             },
             IpcRequest::UpdateClusterDrag {
                 cluster_x: 130.0,
@@ -497,21 +485,6 @@ mod tests {
         ] {
             let json = serde_json::to_string(&fixture).expect("serialize request");
             let parsed: IpcRequest = serde_json::from_str(&json).expect("parse request");
-            assert_eq!(parsed, fixture);
-        }
-    }
-
-    #[test]
-    fn round_trip_ipc_overview_interaction_responses() {
-        for fixture in [
-            IpcResponse::ClusterDragAck { state_revision: 11 },
-            IpcResponse::ClusterDragError {
-                message: "stale base revision".to_owned(),
-                state_revision: 12,
-            },
-        ] {
-            let json = serde_json::to_string(&fixture).expect("serialize response");
-            let parsed: IpcResponse = serde_json::from_str(&json).expect("parse response");
             assert_eq!(parsed, fixture);
         }
     }
