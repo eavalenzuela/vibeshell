@@ -49,6 +49,8 @@ struct BindingConfig {
     keyboard_move_commit_command: String,
     keyboard_move_cancel_key: String,
     keyboard_move_cancel_command: String,
+    cheatsheet_key: String,
+    cheatsheet_command: String,
 }
 
 impl Default for BindingConfig {
@@ -107,6 +109,10 @@ impl Default for BindingConfig {
             keyboard_move_commit_command: "vibeshellctl ipc commit-keyboard-move".to_owned(),
             keyboard_move_cancel_key: "$mod+Shift+Escape".to_owned(),
             keyboard_move_cancel_command: "vibeshellctl ipc cancel-keyboard-move".to_owned(),
+            cheatsheet_key: "$mod+slash".to_owned(),
+            cheatsheet_command: "swaymsg '[app_id=\"com.vibeshell.cheatsheet\"] kill' \
+                                 || cheatsheet"
+                .to_owned(),
         }
     }
 }
@@ -166,6 +172,8 @@ fn parse_args() -> Result<BindingConfig, String> {
             "--keyboard-move-commit-command" => config.keyboard_move_commit_command = value,
             "--keyboard-move-cancel-key" => config.keyboard_move_cancel_key = value,
             "--keyboard-move-cancel-command" => config.keyboard_move_cancel_command = value,
+            "--cheatsheet-key" => config.cheatsheet_key = value,
+            "--cheatsheet-command" => config.cheatsheet_command = value,
             "--help" | "-h" => return Err(help_text()),
             _ => return Err(format!("unknown argument: {flag}\n\n{}", help_text())),
         }
@@ -224,6 +232,8 @@ fn help_text() -> String {
         "  --keyboard-move-commit-command <command>",
         "  --keyboard-move-cancel-key <key>",
         "  --keyboard-move-cancel-command <command>",
+        "  --cheatsheet-key <key>",
+        "  --cheatsheet-command <command>",
     ]
     .join("\n")
 }
@@ -327,6 +337,11 @@ fn render(config: &BindingConfig) -> String {
             config.keyboard_move_cancel_key, config.keyboard_move_cancel_command
         ),
         "",
+        &format!(
+            "bindsym {} exec {}",
+            config.cheatsheet_key, config.cheatsheet_command
+        ),
+        "",
     ]
     .join("\n")
 }
@@ -372,5 +387,7 @@ mod tests {
         assert!(first.contains("bindsym $mod+period exec vibeshellctl ipc cycle-strip-forward"));
         assert!(first.contains("bindsym $mod+Tab exec vibeshellctl ipc cycle-cluster"));
         assert!(first.contains("bindsym $mod+Shift+r exec"));
+        assert!(first.contains("bindsym $mod+slash exec"));
+        assert!(first.contains("cheatsheet"));
     }
 }

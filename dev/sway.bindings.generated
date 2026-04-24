@@ -28,3 +28,5 @@ bindsym $mod+Shift+Left exec vibeshellctl ipc keyboard-move-by --dx -96 --dy 0
 bindsym $mod+Shift+Right exec vibeshellctl ipc keyboard-move-by --dx 96 --dy 0
 bindsym $mod+Shift+Return exec vibeshellctl ipc commit-keyboard-move
 bindsym $mod+Shift+Escape exec vibeshellctl ipc cancel-keyboard-move
+
+bindsym $mod+slash exec swaymsg '[app_id="com.vibeshell.cheatsheet"] kill' || cheatsheet

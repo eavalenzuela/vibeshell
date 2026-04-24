@@ -32,6 +32,7 @@ smoke-binaries:
     cargo build -p panel --bins
     cargo build -p launcher --bins
     cargo build -p notifd --bins
+    cargo build -p cheatsheet --bins
     cargo build -p vibeshellctl --bins
 
 test:

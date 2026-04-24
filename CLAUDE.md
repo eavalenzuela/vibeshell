@@ -36,7 +36,7 @@ Logging is controlled by `VIBESHELL_LOG=<level>` (falls back to `RUST_LOG`; defa
 
 ## Architecture
 
-**vibeshell** is a Wayland shell environment for Sway, implementing a "Continuum WM" cluster-based window management system. It is a Rust workspace with 5 apps and 4 shared crates.
+**vibeshell** is a Wayland shell environment for Sway, implementing a "Continuum WM" cluster-based window management system. It is a Rust workspace with 6 apps and 4 shared crates.
 
 ### Workspace layout
 
@@ -46,6 +46,7 @@ apps/
   launcher/     # App launcher with fuzzy search and usage-ranking
   notifd/       # DBus notifications daemon (org.freedesktop.Notifications)
   overlay/      # Cluster overview & zoom navigation UI
+  cheatsheet/   # Modal overlay listing all keybindings (triggered by $mod+/)
   vibeshellctl/ # CLI binary for lifecycle management and IPC dispatch
 
 crates/

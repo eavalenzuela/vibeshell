@@ -68,6 +68,8 @@ KEYBOARD_MOVE_COMMIT_KEY="${VIBESHELL_KEYBOARD_MOVE_COMMIT_KEY:-\$mod+Shift+Retu
 KEYBOARD_MOVE_COMMIT_CMD="${VIBESHELL_KEYBOARD_MOVE_COMMIT_CMD:-vibeshellctl ipc commit-keyboard-move}"
 KEYBOARD_MOVE_CANCEL_KEY="${VIBESHELL_KEYBOARD_MOVE_CANCEL_KEY:-\$mod+Shift+Escape}"
 KEYBOARD_MOVE_CANCEL_CMD="${VIBESHELL_KEYBOARD_MOVE_CANCEL_CMD:-vibeshellctl ipc cancel-keyboard-move}"
+CHEATSHEET_KEY="${VIBESHELL_CHEATSHEET_KEY:-\$mod+slash}"
+CHEATSHEET_CMD="${VIBESHELL_CHEATSHEET_CMD:-swaymsg '[app_id=\"com.vibeshell.cheatsheet\"] kill' || cheatsheet}"
 
 cargo run -p sway --bin generate-bindings -- \
   --output "${SWAY_BINDINGS_OUTPUT}" \
@@ -114,7 +116,9 @@ cargo run -p sway --bin generate-bindings -- \
   --keyboard-move-commit-key "${KEYBOARD_MOVE_COMMIT_KEY}" \
   --keyboard-move-commit-command "${KEYBOARD_MOVE_COMMIT_CMD}" \
   --keyboard-move-cancel-key "${KEYBOARD_MOVE_CANCEL_KEY}" \
-  --keyboard-move-cancel-command "${KEYBOARD_MOVE_CANCEL_CMD}"
+  --keyboard-move-cancel-command "${KEYBOARD_MOVE_CANCEL_CMD}" \
+  --cheatsheet-key "${CHEATSHEET_KEY}" \
+  --cheatsheet-command "${CHEATSHEET_CMD}"
 
 if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
   echo "XDG_RUNTIME_DIR is required to start Sway." >&2
