@@ -164,7 +164,8 @@ fi
 
 section "Daemon"
 
-XDG_RUNTIME_DIR="${SCRATCH_DIR}" "${TARGET_DIR}/vibeshellctl" daemon &>"${DAEMON_LOG}" &
+XDG_RUNTIME_DIR="${SCRATCH_DIR}" XDG_CONFIG_HOME="${SCRATCH_DIR}/xdg-config" \
+  "${TARGET_DIR}/vibeshellctl" daemon &>"${DAEMON_LOG}" &
 DAEMON_PID=$!
 
 wait_for "daemon socket" "[[ -e ${SCRATCH_DIR}/vibeshell-daemon.sock ]]" 10 || exit 1
@@ -378,6 +379,61 @@ elif echo "${CYCLE_RESP}" | jq -e '.message | contains("history_too_short")' >/d
   pass "cycle-cluster correctly reports history_too_short (only 1 cluster)"
 else
   fail "cycle-cluster unexpected response: ${CYCLE_RESP}"
+fi
+
+# ── Test: Config reload via SIGHUP ───────────────────────────────────────────
+# Writes a config.toml with auto_cluster=true and an assignment hint, then
+# sends SIGHUP to the daemon.  Verifies the reload log line shows the new
+# values — proves the SIGHUP → reload_config path is wired end-to-end.
+
+section "Config reload (SIGHUP)"
+
+CONFIG_DIR="${SCRATCH_DIR}/xdg-config/vibeshell"
+mkdir -p "${CONFIG_DIR}"
+cat > "${CONFIG_DIR}/config.toml" <<'CFG'
+config_version = 1
+
+[continuum]
+auto_cluster = true
+
+[[continuum.assignment_hints]]
+app_id = "smoke-test-hint"
+cluster = "hinted"
+CFG
+
+# Byte count in the daemon log before SIGHUP — so we grep only the tail,
+# not any coincidental earlier occurrence.
+LOG_OFFSET_BEFORE="$(wc -c < "${DAEMON_LOG}")"
+
+kill -HUP "${DAEMON_PID}"
+
+# Wait for the reload log line to appear in the tail.
+wait_for "daemon reload log line" \
+  "tail -c +$((LOG_OFFSET_BEFORE + 1)) '${DAEMON_LOG}' | grep -q 'reloaded config into StateOwner'" \
+  5 || true
+
+# Tracing's compact formatter wraps each field name with ANSI color codes
+# (e.g. `\e[3mauto_cluster\e[0m\e[2m=\e[0mtrue`), which breaks naive regexes.
+# Strip them so the assertions below can match `field=value` directly.
+RELOAD_TAIL="$(tail -c +$((LOG_OFFSET_BEFORE + 1)) "${DAEMON_LOG}" \
+  | sed -E $'s/\x1b\\[[0-9;]*m//g')"
+
+if echo "${RELOAD_TAIL}" | grep -q "reloaded config into StateOwner"; then
+  pass "Daemon logged reload after SIGHUP"
+else
+  fail "Daemon did not log 'reloaded config into StateOwner' after SIGHUP"
+fi
+
+if echo "${RELOAD_TAIL}" | grep -E "reloaded config.*auto_cluster=true" >/dev/null; then
+  pass "Reload picked up auto_cluster=true from new config"
+else
+  fail "Reload did not pick up auto_cluster=true (log tail: $(echo "${RELOAD_TAIL}" | grep reload | head -1))"
+fi
+
+if echo "${RELOAD_TAIL}" | grep -E "reloaded config.*hints=1" >/dev/null; then
+  pass "Reload picked up 1 assignment hint from new config"
+else
+  fail "Reload did not pick up the assignment hint"
 fi
 
 # ── Test: Panel starts ───────────────────────────────────────────────────────
