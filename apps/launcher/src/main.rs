@@ -88,12 +88,82 @@ enum SearchResult {
     },
 }
 
+/// Which category of result a row belongs to. Drives section headers in the
+/// launcher list and the Tab-cycled filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultCategory {
+    App,
+    Window,
+    Cluster,
+}
+
+impl ResultCategory {
+    fn header_label(self) -> &'static str {
+        match self {
+            Self::App => "Apps",
+            Self::Window => "Open Windows",
+            Self::Cluster => "Clusters",
+        }
+    }
+
+    /// Fixed display order of the sections: apps first (most familiar),
+    /// then open windows (most common action), then clusters (rarer).
+    fn display_order(self) -> u8 {
+        match self {
+            Self::App => 0,
+            Self::Window => 1,
+            Self::Cluster => 2,
+        }
+    }
+}
+
+/// Tab-cycled category filter. `All` is the default; the other variants
+/// hide everything outside the chosen category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultFilter {
+    All,
+    Only(ResultCategory),
+}
+
+impl ResultFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Only(ResultCategory::App),
+            Self::Only(ResultCategory::App) => Self::Only(ResultCategory::Window),
+            Self::Only(ResultCategory::Window) => Self::Only(ResultCategory::Cluster),
+            Self::Only(ResultCategory::Cluster) => Self::All,
+        }
+    }
+
+    fn includes(self, category: ResultCategory) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(cat) => cat == category,
+        }
+    }
+
+    fn placeholder(self) -> String {
+        match self {
+            Self::All => "Launch, switch, or activate…".to_owned(),
+            Self::Only(cat) => format!("Filter: {} only (Tab to cycle)", cat.header_label()),
+        }
+    }
+}
+
 impl SearchResult {
     fn score(&self) -> i32 {
         match self {
             Self::App(e) => e.score,
             Self::Window { score, .. } => *score,
             Self::Cluster { score, .. } => *score,
+        }
+    }
+
+    fn category(&self) -> ResultCategory {
+        match self {
+            Self::App(_) => ResultCategory::App,
+            Self::Window { .. } => ResultCategory::Window,
+            Self::Cluster { .. } => ResultCategory::Cluster,
         }
     }
 
@@ -387,7 +457,7 @@ fn build_ui(
         .build();
 
     let input = gtk::Entry::builder()
-        .placeholder_text("Launch an app...")
+        .placeholder_text(ResultFilter::All.placeholder())
         .build();
 
     let list = gtk::ListBox::new();
@@ -405,36 +475,75 @@ fn build_ui(
     let usage_path = usage_stats_path();
     let usage_stats = Rc::new(RefCell::new(load_usage_stats(&usage_path)));
     let canvas_state: Rc<Option<common::contracts::CanvasState>> = Rc::new(fetch_canvas_state());
+    let filter = Rc::new(RefCell::new(ResultFilter::All));
+    let last_query = Rc::new(RefCell::new(String::new()));
 
+    // Section headers: attach a bold label above the first row of each new
+    // category. GtkListBox's header func doesn't produce selectable rows, so
+    // arrow navigation steps naturally over the groups.
     {
+        let state_for_header = Rc::clone(&state);
+        list.set_header_func(move |row, before| {
+            let state = state_for_header.borrow();
+            let row_idx = row.index() as usize;
+            let current = state.get(row_idx).map(|r| r.category());
+            let before_cat = before
+                .map(|r| r.index() as usize)
+                .and_then(|idx| state.get(idx).map(|r| r.category()));
+
+            if current != before_cat {
+                if let Some(cat) = current {
+                    let label = gtk::Label::builder()
+                        .label(cat.header_label())
+                        .xalign(0.0)
+                        .margin_top(8)
+                        .margin_bottom(4)
+                        .margin_start(8)
+                        .build();
+                    label.add_css_class("dim-label");
+                    label.add_css_class("heading");
+                    row.set_header(Some(&label));
+                } else {
+                    row.set_header(None::<&gtk::Widget>);
+                }
+            } else {
+                row.set_header(None::<&gtk::Widget>);
+            }
+        });
+    }
+
+    let rebuild_results = {
         let apps = apps.clone();
         let list = list.clone();
-        let state = state.clone();
-        let usage_stats = usage_stats.clone();
+        let state = Rc::clone(&state);
+        let usage_stats = Rc::clone(&usage_stats);
         let runtime_config = Arc::clone(&runtime_config);
         let canvas_state = Rc::clone(&canvas_state);
-        input.connect_changed(move |entry| {
-            let query = entry.text().to_string();
+        let filter = Rc::clone(&filter);
+        Rc::new(move |query: &str| {
             let max_results = runtime_config
                 .lock()
                 .expect("runtime config poisoned")
                 .max_results;
-            let app_results = rank_entries(&apps, &query, max_results, &usage_stats.borrow());
-            let mut merged: Vec<SearchResult> =
-                app_results.into_iter().map(SearchResult::App).collect();
-            if let Some(canvas) = canvas_state.as_ref() {
-                let normalized = query.trim().to_lowercase();
-                if normalized.is_empty() {
-                    // Empty query → launcher doubles as a window switcher.
-                    merged.extend(recent_windows(canvas, max_results));
-                } else {
-                    let wc_results = search_windows_and_clusters(canvas, &normalized, max_results);
-                    merged.extend(wc_results);
-                }
-            }
-            merged.sort_by_key(|r| std::cmp::Reverse(r.score()));
-            merged.truncate(max_results);
+            let merged = compose_launcher_results(
+                &apps,
+                query,
+                max_results,
+                &usage_stats.borrow(),
+                canvas_state.as_ref().as_ref(),
+                *filter.borrow(),
+            );
             populate_search_results(&list, &state, &merged);
+        })
+    };
+
+    {
+        let rebuild_results = Rc::clone(&rebuild_results);
+        let last_query = Rc::clone(&last_query);
+        input.connect_changed(move |entry| {
+            let query = entry.text().to_string();
+            *last_query.borrow_mut() = query.clone();
+            rebuild_results(&query);
         });
     }
 
@@ -474,6 +583,10 @@ fn build_ui(
         let usage_stats = usage_stats.clone();
         let usage_path = usage_path.clone();
         let runtime_config = Arc::clone(&runtime_config);
+        let filter_for_keys = Rc::clone(&filter);
+        let rebuild_for_keys = Rc::clone(&rebuild_results);
+        let input_for_keys = input.clone();
+        let last_query_for_keys = Rc::clone(&last_query);
         let key_controller = gtk::EventControllerKey::new();
         let controlled_window = window.clone();
         key_controller.connect_key_pressed(move |_, key, _, modifiers| match key {
@@ -487,6 +600,21 @@ fn build_ui(
             }
             gdk::Key::Up => {
                 move_selection(&list, -1);
+                glib::Propagation::Stop
+            }
+            gdk::Key::Tab | gdk::Key::ISO_Left_Tab => {
+                // Cycle the category filter. Shift+Tab cycles backwards by
+                // applying next() three times (four states total).
+                let mut current = *filter_for_keys.borrow();
+                current = if modifiers.contains(gdk::ModifierType::SHIFT_MASK) {
+                    current.next().next().next()
+                } else {
+                    current.next()
+                };
+                *filter_for_keys.borrow_mut() = current;
+                input_for_keys.set_placeholder_text(Some(&current.placeholder()));
+                let query = last_query_for_keys.borrow().clone();
+                rebuild_for_keys(&query);
                 glib::Propagation::Stop
             }
             gdk::Key::Return => {
@@ -547,21 +675,9 @@ fn build_ui(
         });
     }
 
-    {
-        let max_results = runtime_config
-            .lock()
-            .expect("runtime config poisoned")
-            .max_results;
-        let app_results = rank_entries(&apps, "", max_results, &usage_stats.borrow());
-        let mut initial: Vec<SearchResult> =
-            app_results.into_iter().map(SearchResult::App).collect();
-        if let Some(canvas) = canvas_state.as_ref() {
-            initial.extend(recent_windows(canvas, max_results));
-        }
-        initial.sort_by_key(|r| std::cmp::Reverse(r.score()));
-        initial.truncate(max_results);
-        populate_search_results(&list, &state, &initial);
-    }
+    // Initial population — share the same rebuild path the input-changed and
+    // Tab handlers use, so category ordering and headers come through.
+    rebuild_results("");
 
     window.present();
     input.grab_focus();
@@ -705,6 +821,55 @@ fn has_word_prefix(text: &str, query: &str) -> bool {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|segment| !segment.is_empty())
         .any(|word| word.starts_with(query))
+}
+
+/// Sort results into category-major, score-descending order. Call this before
+/// passing results to `populate_search_results` so the list-box header-func
+/// sees contiguous groups per category and emits one header per transition.
+fn sort_by_category_and_score(results: &mut [SearchResult]) {
+    results.sort_by(|a, b| {
+        a.category()
+            .display_order()
+            .cmp(&b.category().display_order())
+            .then_with(|| b.score().cmp(&a.score()))
+    });
+}
+
+/// Drop results whose category is excluded by `filter`.
+fn apply_filter(results: &mut Vec<SearchResult>, filter: ResultFilter) {
+    results.retain(|r| filter.includes(r.category()));
+}
+
+/// Compose the launcher's result list for `query` under `filter`. Pure logic
+/// — no GTK — so it can be unit-tested end-to-end.
+fn compose_launcher_results(
+    apps: &[DesktopEntry],
+    query: &str,
+    max_results: usize,
+    usage_stats: &UsageStats,
+    canvas: Option<&common::contracts::CanvasState>,
+    filter: ResultFilter,
+) -> Vec<SearchResult> {
+    let app_results = rank_entries(apps, query, max_results, usage_stats);
+    let mut merged: Vec<SearchResult> = app_results.into_iter().map(SearchResult::App).collect();
+
+    if let Some(canvas) = canvas {
+        let normalized = query.trim().to_lowercase();
+        if normalized.is_empty() {
+            merged.extend(recent_windows(canvas, max_results));
+        } else {
+            merged.extend(search_windows_and_clusters(
+                canvas,
+                &normalized,
+                max_results,
+            ));
+        }
+    }
+
+    apply_filter(&mut merged, filter);
+    sort_by_category_and_score(&mut merged);
+    merged.truncate(max_results);
+    merged
 }
 
 fn populate_search_results(
@@ -1174,6 +1339,74 @@ mod tests {
         let canvas = fixture_canvas();
         let out = recent_windows(&canvas, 2);
         assert!(out.len() <= 2);
+    }
+
+    #[test]
+    fn result_filter_cycles_through_all_then_wraps() {
+        let seen = [
+            ResultFilter::All,
+            ResultFilter::All.next(),
+            ResultFilter::All.next().next(),
+            ResultFilter::All.next().next().next(),
+            ResultFilter::All.next().next().next().next(),
+        ];
+        assert_eq!(seen[0], ResultFilter::All);
+        assert_eq!(seen[1], ResultFilter::Only(ResultCategory::App));
+        assert_eq!(seen[2], ResultFilter::Only(ResultCategory::Window));
+        assert_eq!(seen[3], ResultFilter::Only(ResultCategory::Cluster));
+        assert_eq!(seen[4], ResultFilter::All);
+    }
+
+    #[test]
+    fn result_filter_includes_respects_category() {
+        assert!(ResultFilter::All.includes(ResultCategory::App));
+        assert!(ResultFilter::All.includes(ResultCategory::Window));
+        assert!(ResultFilter::All.includes(ResultCategory::Cluster));
+        assert!(ResultFilter::Only(ResultCategory::Window).includes(ResultCategory::Window));
+        assert!(!ResultFilter::Only(ResultCategory::Window).includes(ResultCategory::App));
+    }
+
+    #[test]
+    fn apply_filter_retains_only_matching_category() {
+        let canvas = fixture_canvas();
+        let mut results = search_windows_and_clusters(&canvas, "fire", 10);
+        results.extend(search_windows_and_clusters(&canvas, "web", 10));
+        let before_len = results.len();
+        assert!(before_len > 0);
+
+        apply_filter(&mut results, ResultFilter::Only(ResultCategory::Cluster));
+        assert!(results
+            .iter()
+            .all(|r| r.category() == ResultCategory::Cluster));
+    }
+
+    #[test]
+    fn sort_by_category_groups_apps_windows_clusters_in_order() {
+        let canvas = fixture_canvas();
+        let mut mixed: Vec<SearchResult> = Vec::new();
+        mixed.extend(recent_windows(&canvas, 10));
+        mixed.extend(search_windows_and_clusters(&canvas, "web", 10));
+        // No apps in this fixture (we'd need DesktopEntry fixtures); just
+        // check that the category ordering invariant holds for what we have.
+
+        sort_by_category_and_score(&mut mixed);
+
+        let mut prev_order: u8 = 0;
+        for r in &mixed {
+            let order = r.category().display_order();
+            assert!(order >= prev_order, "category out of order in sorted list");
+            prev_order = order;
+        }
+    }
+
+    #[test]
+    fn sort_by_category_descends_by_score_within_group() {
+        let canvas = fixture_canvas();
+        let mut windows = recent_windows(&canvas, 10);
+        sort_by_category_and_score(&mut windows);
+        for pair in windows.windows(2) {
+            assert!(pair[0].score() >= pair[1].score());
+        }
     }
 
     #[test]
