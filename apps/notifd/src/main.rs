@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use config::{Config, NotificationsConfig};
+use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -504,6 +505,14 @@ fn add_card(state: &Rc<std::cell::RefCell<UiState>>, event: NotifyEvent) {
     let id = event.id;
     let actions = event.actions;
 
+    // The fd.o notifications spec reserves action key "default" as the implicit
+    // action when the user clicks the notification body itself. Capture it
+    // separately so the card-level click gesture can emit it.
+    let default_action_key = actions
+        .iter()
+        .find(|a| a.key == "default")
+        .map(|a| a.key.clone());
+
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
@@ -564,6 +573,29 @@ fn add_card(state: &Rc<std::cell::RefCell<UiState>>, event: NotifyEvent) {
 
         card.append(&actions_row);
     }
+
+    // Card-level click: invoke the "default" action if one was declared,
+    // otherwise just dismiss. GtkButton children (action buttons, close
+    // button) consume their own clicks, so those don't trigger this.
+    let card_click = gtk::GestureClick::new();
+    card_click.set_button(gdk::BUTTON_PRIMARY);
+    {
+        let state_for_card_click = Rc::clone(state);
+        let default_action_key = default_action_key.clone();
+        card_click.connect_released(move |_, _, _, _| {
+            if let Some(key) = default_action_key.clone() {
+                emit_dbus_event(
+                    &state_for_card_click,
+                    DbusEvent::ActionInvoked {
+                        id,
+                        action_key: key,
+                    },
+                );
+            }
+            close_card(&state_for_card_click, id, CLOSE_REASON_DISMISSED);
+        });
+    }
+    card.add_controller(card_click);
 
     root.prepend(&card);
 
