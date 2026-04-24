@@ -150,6 +150,91 @@ fn fetch_canvas_state() -> Option<common::contracts::CanvasState> {
     }
 }
 
+/// Build a list of recent `SearchResult::Window` entries from the canvas
+/// state, for the empty-query default view. Ordering:
+///
+/// 1. If zoomed into a cluster, that cluster's `recency` comes first.
+/// 2. Then each other cluster's `recency`, in `canvas.clusters` order.
+/// 3. Duplicate window ids are dropped on second encounter.
+///
+/// Windows are scored high enough to outrank apps so the launcher opens
+/// pre-selected on the most-recently-focused window — effectively turning
+/// the launcher into a window switcher when invoked without typing.
+fn recent_windows(
+    canvas: &common::contracts::CanvasState,
+    max_results: usize,
+) -> Vec<SearchResult> {
+    if max_results == 0 {
+        return Vec::new();
+    }
+
+    // Score floor above anything apps can score via usage ranking.
+    const RECENT_BASE_SCORE: i32 = 1_000_000;
+
+    let active_cluster_id = match canvas.zoom {
+        common::contracts::ZoomLevel::Cluster(id) => Some(id),
+        common::contracts::ZoomLevel::Focus(window_id) => canvas
+            .windows
+            .iter()
+            .find(|w| w.id == window_id)
+            .and_then(|w| w.cluster_id),
+        common::contracts::ZoomLevel::Overview => None,
+    };
+
+    let cluster_names: std::collections::HashMap<u64, &str> = canvas
+        .clusters
+        .iter()
+        .map(|c| (c.id, c.name.as_str()))
+        .collect();
+    let windows_by_id: std::collections::HashMap<u64, &common::contracts::Window> =
+        canvas.windows.iter().map(|w| (w.id, w)).collect();
+
+    // Order clusters: active cluster first (if any), then the rest in list order.
+    let mut ordered_clusters: Vec<&common::contracts::Cluster> = Vec::new();
+    if let Some(active) = active_cluster_id {
+        if let Some(cluster) = canvas.clusters.iter().find(|c| c.id == active) {
+            ordered_clusters.push(cluster);
+        }
+    }
+    for cluster in &canvas.clusters {
+        if Some(cluster.id) != active_cluster_id {
+            ordered_clusters.push(cluster);
+        }
+    }
+
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut results = Vec::new();
+
+    for cluster in ordered_clusters {
+        for window_id in &cluster.recency {
+            if !seen.insert(*window_id) {
+                continue;
+            }
+            let Some(window) = windows_by_id.get(window_id) else {
+                continue;
+            };
+            let cluster_name = window
+                .cluster_id
+                .and_then(|id| cluster_names.get(&id).copied())
+                .unwrap_or("unassigned")
+                .to_owned();
+            let score = RECENT_BASE_SCORE - results.len() as i32;
+            results.push(SearchResult::Window {
+                score,
+                window_id: *window_id,
+                title: window.title.clone(),
+                app_id: window.app_id.clone().unwrap_or_default(),
+                cluster_name,
+            });
+            if results.len() >= max_results {
+                return results;
+            }
+        }
+    }
+
+    results
+}
+
 fn search_windows_and_clusters(
     canvas: &common::contracts::CanvasState,
     query: &str,
@@ -339,8 +424,13 @@ fn build_ui(
                 app_results.into_iter().map(SearchResult::App).collect();
             if let Some(canvas) = canvas_state.as_ref() {
                 let normalized = query.trim().to_lowercase();
-                let wc_results = search_windows_and_clusters(canvas, &normalized, max_results);
-                merged.extend(wc_results);
+                if normalized.is_empty() {
+                    // Empty query → launcher doubles as a window switcher.
+                    merged.extend(recent_windows(canvas, max_results));
+                } else {
+                    let wc_results = search_windows_and_clusters(canvas, &normalized, max_results);
+                    merged.extend(wc_results);
+                }
             }
             merged.sort_by_key(|r| std::cmp::Reverse(r.score()));
             merged.truncate(max_results);
@@ -458,16 +548,18 @@ fn build_ui(
     }
 
     {
-        let app_results = rank_entries(
-            &apps,
-            "",
-            runtime_config
-                .lock()
-                .expect("runtime config poisoned")
-                .max_results,
-            &usage_stats.borrow(),
-        );
-        let initial: Vec<SearchResult> = app_results.into_iter().map(SearchResult::App).collect();
+        let max_results = runtime_config
+            .lock()
+            .expect("runtime config poisoned")
+            .max_results;
+        let app_results = rank_entries(&apps, "", max_results, &usage_stats.borrow());
+        let mut initial: Vec<SearchResult> =
+            app_results.into_iter().map(SearchResult::App).collect();
+        if let Some(canvas) = canvas_state.as_ref() {
+            initial.extend(recent_windows(canvas, max_results));
+        }
+        initial.sort_by_key(|r| std::cmp::Reverse(r.score()));
+        initial.truncate(max_results);
         populate_search_results(&list, &state, &initial);
     }
 
@@ -1013,5 +1105,94 @@ mod tests {
         let canvas = fixture_canvas();
         let results = search_windows_and_clusters(&canvas, "qzzzzx", 10);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn recent_windows_returns_empty_when_no_clusters() {
+        let canvas = CanvasState::default();
+        assert!(recent_windows(&canvas, 10).is_empty());
+    }
+
+    #[test]
+    fn recent_windows_orders_active_cluster_first() {
+        // Zoom into cluster 2 ("terminals"). Its recency [201] should precede
+        // cluster 1's windows (101, 102).
+        let mut canvas = fixture_canvas();
+        canvas.zoom = common::contracts::ZoomLevel::Cluster(2);
+        canvas.clusters[0].recency = vec![102, 101];
+        canvas.clusters[1].recency = vec![201];
+
+        let out = recent_windows(&canvas, 10);
+        let ids: Vec<u64> = out
+            .iter()
+            .filter_map(|r| match r {
+                SearchResult::Window { window_id, .. } => Some(*window_id),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ids, vec![201, 102, 101]);
+    }
+
+    #[test]
+    fn recent_windows_dedupes_across_clusters() {
+        let mut canvas = fixture_canvas();
+        // Simulate a stale recency entry: cluster 2 still remembers window 101
+        // (a bug, since 101 lives in cluster 1 now). It should only appear once,
+        // from whichever cluster is visited first.
+        canvas.clusters[0].recency = vec![101, 102];
+        canvas.clusters[1].recency = vec![101, 201];
+
+        let out = recent_windows(&canvas, 10);
+        let ids: Vec<u64> = out
+            .iter()
+            .filter_map(|r| match r {
+                SearchResult::Window { window_id, .. } => Some(*window_id),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ids.iter().filter(|&&id| id == 101).count(), 1);
+    }
+
+    #[test]
+    fn recent_windows_scores_descend_with_position() {
+        let canvas = fixture_canvas();
+        let out = recent_windows(&canvas, 10);
+        for pair in out.windows(2) {
+            assert!(
+                pair[0].score() > pair[1].score(),
+                "scores must strictly descend: {} then {}",
+                pair[0].score(),
+                pair[1].score()
+            );
+        }
+    }
+
+    #[test]
+    fn recent_windows_respects_max_results() {
+        let canvas = fixture_canvas();
+        let out = recent_windows(&canvas, 2);
+        assert!(out.len() <= 2);
+    }
+
+    #[test]
+    fn recent_windows_skips_ids_not_in_windows_list() {
+        let mut canvas = fixture_canvas();
+        // Cluster 1 recency mentions a window (555) that's not in canvas.windows
+        // — simulates a race where the window closed between Sway events.
+        canvas.clusters[0].recency = vec![555, 102];
+
+        let out = recent_windows(&canvas, 10);
+        let ids: Vec<u64> = out
+            .iter()
+            .filter_map(|r| match r {
+                SearchResult::Window { window_id, .. } => Some(*window_id),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!ids.contains(&555));
+        assert!(ids.contains(&102));
     }
 }
