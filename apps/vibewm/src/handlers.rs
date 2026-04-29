@@ -508,11 +508,13 @@ fn handle_layer_commit(state: &mut Vibewm, surface: &WlSurface) {
 mod xwm_handler {
     use smithay::delegate_xwayland_shell;
     use smithay::desktop::Window;
+    use smithay::input::pointer::{Focus, GrabStartData as PointerGrabStartData};
     use smithay::utils::{Logical, Rectangle};
     use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
     use smithay::xwayland::xwm::{Reorder, ResizeEdge as X11ResizeEdge, XwmId};
     use smithay::xwayland::{X11Surface, X11Wm, XwmHandler};
 
+    use crate::grabs::{MoveSurfaceGrab, ResizeEdge as ResizeBits, ResizeSurfaceGrab};
     use crate::state::Vibewm;
 
     impl XwmHandler for Vibewm {
@@ -632,20 +634,101 @@ mod xwm_handler {
             }
         }
 
-        fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {
-            // TODO(W1c-10+): wire X11 move grabs through the existing
-            // MoveSurfaceGrab. X11 doesn't naturally produce a wayland
-            // PointerGrabStartData, so this needs a synthesized start_data.
+        fn move_request(&mut self, _xwm: XwmId, window: X11Surface, _button: u32) {
+            // X11 doesn't carry a wayland `PointerGrabStartData`, so we
+            // synthesize one from (the seat's current pointer location,
+            // the X11 surface's associated wl_surface). The wayland-side
+            // `MoveSurfaceGrab` then takes it from there exactly as if a
+            // wayland client had asked for an interactive move.
+            let Some(target_window) = self
+                .space
+                .elements()
+                .find(|w| matches!(w.x11_surface(), Some(s) if s == &window))
+                .cloned()
+            else {
+                return;
+            };
+            let Some(initial_window_location) = self.space.element_location(&target_window) else {
+                return;
+            };
+            let Some(pointer) = self.seat.get_pointer() else {
+                return;
+            };
+            let Some(wl_surface) = window.wl_surface() else {
+                return;
+            };
+
+            let location = pointer.current_location();
+            let start_data = PointerGrabStartData {
+                focus: Some((wl_surface, (0.0, 0.0).into())),
+                button: 0x110, // BTN_LEFT — buttons in xwm are X11 codes; map
+                // generously to "primary mouse" since the
+                // grab only checks `current_pressed.contains`
+                // for release detection.
+                location,
+            };
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            pointer.set_grab(
+                self,
+                MoveSurfaceGrab {
+                    start_data,
+                    window: target_window,
+                    initial_window_location,
+                },
+                serial,
+                Focus::Clear,
+            );
         }
 
         fn resize_request(
             &mut self,
             _xwm: XwmId,
-            _window: X11Surface,
+            window: X11Surface,
             _button: u32,
-            _resize_edge: X11ResizeEdge,
+            resize_edge: X11ResizeEdge,
         ) {
-            // TODO(W1c-10+): same caveat as move_request.
+            let Some(target_window) = self
+                .space
+                .elements()
+                .find(|w| matches!(w.x11_surface(), Some(s) if s == &window))
+                .cloned()
+            else {
+                return;
+            };
+            let Some(initial_window_location) = self.space.element_location(&target_window) else {
+                return;
+            };
+            let initial_window_size = target_window.geometry().size;
+            let Some(pointer) = self.seat.get_pointer() else {
+                return;
+            };
+            let Some(wl_surface) = window.wl_surface() else {
+                return;
+            };
+
+            let location = pointer.current_location();
+            let start_data = PointerGrabStartData {
+                focus: Some((wl_surface, (0.0, 0.0).into())),
+                button: 0x110,
+                location,
+            };
+
+            // Translate xwm's ResizeEdge into our ResizeBits flags. The two
+            // enums encode the same eight directions; map by name.
+            let edges = match resize_edge {
+                X11ResizeEdge::Top => ResizeBits::TOP,
+                X11ResizeEdge::Bottom => ResizeBits::BOTTOM,
+                X11ResizeEdge::Left => ResizeBits::LEFT,
+                X11ResizeEdge::Right => ResizeBits::RIGHT,
+                X11ResizeEdge::TopLeft => ResizeBits::TOP_LEFT,
+                X11ResizeEdge::TopRight => ResizeBits::TOP_RIGHT,
+                X11ResizeEdge::BottomLeft => ResizeBits::BOTTOM_LEFT,
+                X11ResizeEdge::BottomRight => ResizeBits::BOTTOM_RIGHT,
+            };
+            let initial_rect = Rectangle::new(initial_window_location, initial_window_size);
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            let grab = ResizeSurfaceGrab::start(start_data, target_window, edges, initial_rect);
+            pointer.set_grab(self, grab, serial, Focus::Clear);
         }
     }
 
