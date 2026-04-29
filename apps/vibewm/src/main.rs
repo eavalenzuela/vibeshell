@@ -33,6 +33,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "xwayland")]
     crate::xwayland::start_xwayland(&mut event_loop, &state);
 
+    // Load user keybindings from disk (or fall back to hardcoded defaults).
+    // SIGHUP-driven reload is wired below so editing the config + running
+    // `vibeshellctl reload` re-reads without a vibewm restart.
+    crate::keybindings::reload_from_disk();
+    {
+        let (_handle, reload_rx) = common::spawn_reload_listener();
+        std::thread::spawn(move || {
+            while reload_rx.recv().is_ok() {
+                crate::keybindings::reload_from_disk();
+            }
+        });
+    }
+
     // Children spawned from this process inherit `WAYLAND_DISPLAY`, so e.g.
     // `vibewm -- vibeshell-panel` runs the panel against this compositor.
     // SAFETY: set_var is unsafe in newer Rust editions because env state is
