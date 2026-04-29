@@ -12,6 +12,7 @@ use smithay::desktop::{
 };
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::Output;
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_buffer;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
@@ -33,6 +34,7 @@ use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shell::wlr_layer::{
     Layer, LayerSurface as WlrLayerSurface, WlrLayerShellHandler, WlrLayerShellState,
 };
+use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
     XdgToplevelSurfaceData,
@@ -40,7 +42,7 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use crate::state::{ClientState, Vibewm};
@@ -153,9 +155,31 @@ impl XdgShellHandler for Vibewm {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        // Send a sensible initial-configure size so clients don't pick their
+        // own. We use the active output's mode minus a margin so the window
+        // is visible without overlapping the panel area. Daemon-driven layout
+        // (W1c-3 ApplyLayoutOps) replaces this once the daemon ingests the
+        // new toplevel.
+        let initial_size = self
+            .space
+            .outputs()
+            .next()
+            .and_then(|o| o.current_mode())
+            .map(|m| (m.size.w, m.size.h))
+            .map(|(w, h)| (w.saturating_sub(64).max(640), h.saturating_sub(96).max(480)))
+            .unwrap_or((1024, 768));
+        surface.with_pending_state(|state| {
+            state.size = Some(smithay::utils::Size::from(initial_size));
+        });
+
         let window = Window::new_wayland_window(surface);
         let id = self.model.register_window(window.clone());
-        tracing::info!(window_id = id, "vibewm: new toplevel");
+        tracing::info!(
+            window_id = id,
+            initial_w = initial_size.0,
+            initial_h = initial_size.1,
+            "vibewm: new toplevel"
+        );
         self.space.map_element(window, (0, 0), false);
         self.last_known_position.insert(id, (0, 0));
         self.broadcast_workspace_or_window();
@@ -209,6 +233,38 @@ impl XdgShellHandler for Vibewm {
 }
 
 delegate_xdg_shell!(Vibewm);
+
+// --- Xdg decoration ---
+
+// Force server-side decorations on every toplevel. vibewm doesn't have a
+// titlebar yet, but advertising SSD is what stops Gtk and other clients from
+// drawing CSDs awkwardly on top of vibewm's own window. Once vibewm has a
+// proper window-frame (W1d+), this becomes the integration point for
+// per-window decoration choices.
+impl XdgDecorationHandler for Vibewm {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_pending_configure();
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_pending_configure();
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_pending_configure();
+    }
+}
+
+delegate_xdg_decoration!(Vibewm);
 
 fn handle_xdg_commit(popups: &mut PopupManager, space: &Space<Window>, surface: &WlSurface) {
     if let Some(window) = space

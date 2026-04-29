@@ -36,6 +36,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
     }
 
+    // Write the socket name to a sidecar file so external launchers
+    // (`scripts/start-vibeshell-session`) can pick the right WAYLAND_DISPLAY
+    // without guessing among stale wayland-N sockets left behind by crashed
+    // earlier runs. Best-effort: a missing sidecar just means launchers fall
+    // back to socket-snapshot heuristics.
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        let sidecar = std::path::PathBuf::from(runtime_dir).join("vibewm.wayland-display");
+        if let Err(e) = std::fs::write(&sidecar, state.socket_name.to_string_lossy().as_bytes()) {
+            tracing::warn!(?e, path = %sidecar.display(), "vibewm: sidecar write failed");
+        }
+    }
+
     tracing::info!(
         socket = %state.socket_name.to_string_lossy(),
         "vibewm: ready (W1b)",

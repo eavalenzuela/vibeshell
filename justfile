@@ -45,6 +45,11 @@ smoke-binaries:
 run-vibewm *args:
     cargo run -p vibewm -- {{args}}
 
+# Boot the full vibeshell session against vibewm (WM_BACKEND=wlroots).
+# Mirror of run-session but for the wlroots-style compositor instead of sway.
+run-vibeshell-session:
+    ./scripts/start-vibeshell-session
+
 test:
     cargo test --workspace
 

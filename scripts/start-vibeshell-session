@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# Phase 8 W1c-4: boot a full vibeshell session against the wlroots-style
+# `vibewm` compositor. Mirror of `scripts/start-sway-session` but pointing
+# the daemon at vibewm instead of sway.
+#
+# Today this is a dogfooding script — it exists to surface what's broken in
+# the wlroots path. Production reliability lives in start-sway-session for
+# now; once we reach parity, the two scripts collapse into one.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+VIBEWM_CMD="${VIBESHELL_VIBEWM_CMD:-cargo run -p vibewm}"
+DAEMON_CMD="${VIBESHELL_DAEMON_CMD:-cargo run -p vibeshellctl -- daemon}"
+PANEL_CMD="${VIBESHELL_PANEL_CMD:-cargo run -p panel}"
+LAUNCHER_CMD="${VIBESHELL_LAUNCHER_CMD:-cargo run -p launcher}"
+NOTIFD_CMD="${VIBESHELL_NOTIFD_CMD:-cargo run -p notifd}"
+
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+  echo "XDG_RUNTIME_DIR is required to start vibewm." >&2
+  exit 1
+fi
+
+log() {
+  printf '[start-vibeshell-session] [%s] %s\n' "$1" "${*:2}"
+}
+
+VIBEWM_CONTROL_SOCKET="${VIBEWM_SOCKET:-${XDG_RUNTIME_DIR}/vibewm-control.sock}"
+VIBEWM_DISPLAY_SIDECAR="${XDG_RUNTIME_DIR}/vibewm.wayland-display"
+rm -f "${VIBEWM_CONTROL_SOCKET}" "${VIBEWM_DISPLAY_SIDECAR}"
+
+COMPONENT_NAMES=()
+COMPONENT_PIDS=()
+
+start_component() {
+  local name="$1"
+  local cmd="$2"
+  # `exec` swaps the bash wrapper for the child so $! is the actual pid of
+  # the long-lived component, not the bash wrapper. We deliberately avoid
+  # `setsid` here: setsid forks-and-exits the parent, so `$!` would point
+  # at the already-dead setsid stub instead of the real component.
+  bash -c "exec ${cmd}" &
+  local pid=$!
+  COMPONENT_NAMES+=("${name}")
+  COMPONENT_PIDS+=("${pid}")
+  log INFO "Started ${name} (pid=${pid})"
+}
+
+cleanup() {
+  trap - EXIT INT TERM
+  log INFO "Shutting down session"
+  for pid in "${COMPONENT_PIDS[@]}"; do
+    kill -TERM "${pid}" 2>/dev/null || true
+  done
+  for pid in "${COMPONENT_PIDS[@]}"; do
+    wait "${pid}" 2>/dev/null || true
+  done
+  if [[ -n "${VIBEWM_PID:-}" ]] && kill -0 "${VIBEWM_PID}" 2>/dev/null; then
+    log INFO "Stopping vibewm (pid=${VIBEWM_PID})"
+    kill -TERM "${VIBEWM_PID}" 2>/dev/null || true
+    wait "${VIBEWM_PID}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+log INFO "Launching vibewm: ${VIBEWM_CMD}"
+bash -c "exec ${VIBEWM_CMD}" &
+VIBEWM_PID=$!
+log DEBUG "vibewm spawned, pid=${VIBEWM_PID}"
+
+# Wait for vibewm to write its sidecar (which signals both its wayland socket
+# and its control socket are bound). Bail if it dies before that.
+for tick in $(seq 1 100); do
+  if ! kill -0 "${VIBEWM_PID}" 2>/dev/null; then
+    log ERROR "vibewm exited before its sockets were ready (tick=${tick})"
+    exit 1
+  fi
+  if [[ -S "${VIBEWM_CONTROL_SOCKET}" && -f "${VIBEWM_DISPLAY_SIDECAR}" ]]; then
+    WAYLAND_DISPLAY="$(cat "${VIBEWM_DISPLAY_SIDECAR}")"
+    if [[ -n "${WAYLAND_DISPLAY}" ]]; then
+      export WAYLAND_DISPLAY
+      break
+    fi
+  fi
+  sleep 0.1
+done
+
+if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+  log ERROR "vibewm did not advertise a fresh WAYLAND_DISPLAY in time"
+  exit 1
+fi
+
+log INFO "vibewm is up: WAYLAND_DISPLAY=${WAYLAND_DISPLAY}, VIBEWM_SOCKET=${VIBEWM_CONTROL_SOCKET}"
+
+export WM_BACKEND=wlroots
+export VIBEWM_SOCKET="${VIBEWM_CONTROL_SOCKET}"
+
+start_component "daemon" "${DAEMON_CMD}"
+sleep 0.5  # let daemon socket bind before clients dispatch IPC
+start_component "panel" "${PANEL_CMD}"
+start_component "launcher" "${LAUNCHER_CMD}"
+start_component "notifd" "${NOTIFD_CMD}"
+
+log INFO "Session running (vibewm pid=${VIBEWM_PID}). Ctrl-C to stop."
+
+# Block on vibewm; cleanup trap takes care of the rest on exit.
+wait "${VIBEWM_PID}"
+EXIT=$?
+log INFO "vibewm exited with status=${EXIT}"
+exit "${EXIT}"

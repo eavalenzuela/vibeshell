@@ -21,6 +21,7 @@ use smithay::wayland::compositor::{CompositorClientState, CompositorState};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
+use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::socket::ListeningSocketSource;
@@ -39,6 +40,10 @@ pub struct Vibewm {
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    /// Held to keep the xdg-decoration global alive. The handler is a stateless
+    /// "always-SSD" responder so we never actually read this field back.
+    #[allow(dead_code)]
+    pub xdg_decoration_state: XdgDecorationState,
     pub layer_shell_state: WlrLayerShellState,
     pub shm_state: ShmState,
     /// Held to keep the xdg-output global alive for the compositor's lifetime.
@@ -70,6 +75,7 @@ impl Vibewm {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
@@ -93,6 +99,7 @@ impl Vibewm {
             popups: PopupManager::default(),
             compositor_state,
             xdg_shell_state,
+            xdg_decoration_state,
             layer_shell_state,
             shm_state,
             output_manager_state,
