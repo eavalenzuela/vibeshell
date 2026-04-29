@@ -36,8 +36,11 @@ use smithay::backend::udev::{UdevBackend, UdevEvent};
 use smithay::output::{Mode as WlMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::EventLoop;
+// `control::Device` is the trait that exposes `get_connector`, `get_encoder`,
+// `resource_handles` etc. on a DrmDevice. The top-level `drm::Device` is only
+// for raw fd accessors and isn't what we want here.
+use smithay::reexports::drm::control::Device as _;
 use smithay::reexports::drm::control::{connector, crtc, ModeTypeFlags};
-use smithay::reexports::drm::Device as _;
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::utils::{DeviceFd, Transform};
@@ -235,7 +238,7 @@ fn open_drm_device(
     let exporter = GbmFramebufferExporter::new(gbm.clone(), drm_node.into());
 
     // EGL display + GLES renderer.
-    let egl_display = unsafe_egl_from_gbm(&gbm)?;
+    let egl_display = egl_from_gbm(&gbm)?;
     let egl_context =
         EGLContext::new_with_priority(&egl_display, ContextPriority::High).or_else(|_| {
             // Some drivers (incl. virtio-gpu) reject non-Medium priority.
@@ -389,15 +392,17 @@ fn open_drm_device(
     Ok(())
 }
 
-/// EGLDisplay::new wraps a raw GBM device pointer; smithay's helper does this
-/// via `EGLDisplay::new(gbm.clone())` with a valid display platform. Wrapping
-/// in a function to keep the unsafe localized.
-fn unsafe_egl_from_gbm(
+/// `EGLDisplay::new` is `unsafe` in smithay 0.7 because it doesn't validate
+/// the GBM device pointer at runtime — caller promises it's a live native
+/// display. Wrapping the unsafe block in this helper keeps it localized.
+fn egl_from_gbm(
     gbm: &GbmDevice<DrmDeviceFd>,
 ) -> Result<EGLDisplay, Box<dyn std::error::Error>> {
-    // smithay 0.7's EGLDisplay::new takes the GbmDevice directly via
-    // EGLNativeDisplay; no unsafe needed at the call site.
-    let display = EGLDisplay::new(gbm.clone())?;
+    // SAFETY: `gbm` is a live GbmDevice we just created from an open DRM fd
+    // owned by the session; it's valid for the lifetime of the resulting
+    // EGLDisplay (which we own and don't drop until session teardown).
+    #[allow(unsafe_code)]
+    let display = unsafe { EGLDisplay::new(gbm.clone())? };
     Ok(display)
 }
 
