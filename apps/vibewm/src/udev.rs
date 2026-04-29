@@ -16,8 +16,6 @@
 //! not drawn yet (pointer events still fire; visual cursor is W1c-DRM-2).
 
 use std::collections::HashMap;
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
-use std::path::Path;
 use std::time::Duration;
 
 use smithay::backend::allocator::format::FormatSet;
@@ -127,7 +125,9 @@ pub fn run_udev(
         return Err("udev: no DRM devices found — is virtio-gpu / amdgpu / i915 loaded?".into());
     }
     for (device_id, path) in initial_devices {
-        if let Err(e) = open_drm_device(state, device_id, path) {
+        // `device_list()` yields `&Path` — copy to PathBuf so the device
+        // entry can outlive the udev iterator borrow.
+        if let Err(e) = open_drm_device(state, device_id, path.to_path_buf()) {
             warn!(?e, %device_id, "udev: failed to bring up DRM device; trying next");
         }
     }
@@ -213,16 +213,14 @@ fn open_drm_device(
     info!(%device_id, ?path, "udev: opening DRM device");
 
     // Open via the session so logind hands us a privileged FD without us
-    // being root.
+    // being root. `Session::open` returns an `OwnedFd` directly in smithay
+    // 0.7 — no need for the FromRawFd dance.
     let udev = state.udev.as_mut().ok_or("udev state missing")?;
-    let fd = udev.session.open(
+    let owned_fd = udev.session.open(
         &path,
         OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
     )?;
-    // SAFETY: `session.open` returned a fresh FD that we own.
-    #[allow(unsafe_code)]
-    let fd = DeviceFd::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    let drm_fd = DrmDeviceFd::new(fd);
+    let drm_fd = DrmDeviceFd::new(DeviceFd::from(owned_fd));
     let drm_node = DrmNode::from_path(&path)?;
 
     // Atomic modesetting + connector restore. The notifier is the source we
