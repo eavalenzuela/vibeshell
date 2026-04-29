@@ -10,6 +10,7 @@ use smithay::reexports::wayland_server::Display;
 
 mod handlers;
 mod input;
+mod ipc;
 mod state;
 mod winit;
 
@@ -23,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = Vibewm::new(&mut event_loop, display);
 
     crate::winit::init_winit(&mut event_loop, &mut state)?;
+    crate::ipc::init_ipc(&mut event_loop)?;
 
     // Children spawned from this process inherit `WAYLAND_DISPLAY`, so e.g.
     // `vibewm -- vibeshell-panel` runs the panel against this compositor.

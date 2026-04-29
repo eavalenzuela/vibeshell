@@ -5,6 +5,7 @@
 //! for the duration of the compositor process.
 
 use std::ffi::OsString;
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
 use smithay::desktop::{PopupManager, Space, Window, WindowSurfaceType};
@@ -42,6 +43,11 @@ pub struct Vibewm {
     pub seat_state: SeatState<Vibewm>,
     pub data_device_state: DataDeviceState,
     pub seat: Seat<Self>,
+
+    /// Long-lived subscriber connections for the vibewm-control IPC. Each
+    /// stream blocks-on-read on the client side and gets pushed JSON-line
+    /// `VibewmResponse::Event(...)` messages when state changes.
+    pub event_subscribers: Vec<UnixStream>,
 }
 
 impl Vibewm {
@@ -80,6 +86,7 @@ impl Vibewm {
             seat_state,
             data_device_state,
             seat,
+            event_subscribers: Vec::new(),
         }
     }
 

@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 pub use common::contracts::{ClusterId, WindowId};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceMetadata {
@@ -143,7 +144,7 @@ impl WorkspaceTransitionController {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -278,7 +279,7 @@ impl Default for DiffThresholds {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutOp {
     pub window_id: WindowId,
     pub target: Rect,

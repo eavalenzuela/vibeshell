@@ -2826,6 +2826,7 @@ name = "vibewm"
 version = "0.1.0"
 dependencies = [
  "common",
+ "serde_json",
  "smithay",
  "tracing",
  "tracing-subscriber",
@@ -3460,6 +3461,8 @@ name = "wm"
 version = "0.1.0"
 dependencies = [
  "common",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
 ]

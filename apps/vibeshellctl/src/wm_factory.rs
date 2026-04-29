@@ -10,9 +10,7 @@ pub fn connect_default() -> Result<Box<dyn WmBackend>, BackendError> {
     let kind = std::env::var("WM_BACKEND").unwrap_or_else(|_| "sway".to_owned());
     match kind.as_str() {
         "sway" => Ok(Box::new(sway::SwayBackend::connect()?)),
-        "wlroots" => Err(BackendError::NotImplemented(
-            "wlroots: `apps/vibewm` runs but daemon control-plane bridge is Phase 8 W1c".into(),
-        )),
+        "wlroots" => Ok(Box::new(wm::WlrootsBackend::connect()?)),
         other => Err(BackendError::Other(format!(
             "unknown WM_BACKEND `{other}` (expected `sway` or `wlroots`)"
         ))),
