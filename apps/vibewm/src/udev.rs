@@ -341,7 +341,9 @@ fn open_drm_device(
     // Stand up the DrmCompositor. It owns the surface + GBM-backed
     // framebuffer + render-element pipeline; we feed it elements per VBlank.
     let drm_compositor = DrmCompositor::new(
-        smithay::backend::drm::compositor::OutputModeSource::Static {
+        // OutputModeSource is the public re-export under smithay::output;
+        // backend::drm::compositor:: is the private internal path.
+        smithay::output::OutputModeSource::Static {
             size: (mode_size.0 as i32, mode_size.1 as i32).into(),
             scale: smithay::utils::Scale::from(1.0),
             transform: Transform::Normal,
