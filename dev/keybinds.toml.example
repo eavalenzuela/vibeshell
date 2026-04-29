@@ -1,0 +1,121 @@
+# Vibewm keybindings — example config.
+#
+# Copy to `$XDG_CONFIG_HOME/vibeshell/keybinds.toml` (default
+# `~/.config/vibeshell/keybinds.toml`) and edit. Vibewm reads it at boot;
+# `vibeshellctl reload` (or SIGHUP to vibewm) re-reads without restart.
+# `VIBESHELL_KEYBINDS=/path/to/file` overrides the location.
+#
+# Schema per binding:
+#   keysym:    string passed to xkb_keysym_from_name (case-insensitive).
+#              Examples: "space", "Tab", "Return", "Escape", "F1", "a", "1",
+#              "Up"/"Down"/"Left"/"Right", "equal", "minus", "slash",
+#              "period", "comma".
+#   modifiers: list of "super"/"logo"/"mod4"/"win" (Super), "shift",
+#              "ctrl"/"control", "alt"/"mod1". Empty list = bare keysym
+#              (matches only when no modifiers are held).
+#   action:    space-separated argv. First token "spawn" runs the named
+#              binary directly (e.g. `spawn launcher`); anything else is
+#              forwarded to `vibeshellctl` (e.g. `ipc cycle-cluster
+#              --direction forward` runs `vibeshellctl ipc cycle-cluster
+#              --direction forward`).
+#
+# These entries reproduce the hardcoded defaults — vibewm uses them
+# verbatim if no config file exists. Edit freely; missing entries from the
+# example are simply unbound.
+
+# ---- Launcher / cheatsheet ----
+
+[[bindings]]
+keysym = "space"
+modifiers = ["super"]
+action = "spawn launcher"
+
+[[bindings]]
+keysym = "slash"
+modifiers = ["super"]
+action = "spawn cheatsheet"
+
+# ---- Cluster cycling (Mod+Tab / Mod+Shift+Tab) ----
+
+[[bindings]]
+keysym = "Tab"
+modifiers = ["super"]
+action = "ipc cycle-cluster --direction forward"
+
+[[bindings]]
+keysym = "Tab"
+modifiers = ["super", "shift"]
+action = "ipc cycle-cluster --direction backward"
+
+# ---- Zoom mode (Overview ↔ Cluster ↔ Focus) ----
+
+[[bindings]]
+keysym = "equal"
+modifiers = ["super"]
+action = "ipc zoom-in-mode"
+
+[[bindings]]
+keysym = "minus"
+modifiers = ["super"]
+action = "ipc zoom-out-mode"
+
+# ---- Context-strip cycling (within Focus zoom) ----
+
+[[bindings]]
+keysym = "period"
+modifiers = ["super"]
+action = "ipc cycle-strip-forward"
+
+[[bindings]]
+keysym = "comma"
+modifiers = ["super"]
+action = "ipc cycle-strip-backward"
+
+# ---- Session control ----
+
+[[bindings]]
+keysym = "e"
+modifiers = ["super", "shift"]
+action = "logout"
+
+[[bindings]]
+keysym = "r"
+modifiers = ["super", "shift"]
+action = "reload"
+
+# ---- Keyboard cluster move (Mod+Shift+M, then Mod+Shift+arrows / Enter / Esc) ----
+
+[[bindings]]
+keysym = "m"
+modifiers = ["super", "shift"]
+action = "ipc enter-keyboard-move-mode-selected"
+
+[[bindings]]
+keysym = "Up"
+modifiers = ["super", "shift"]
+action = "ipc keyboard-move-by --dx 0 --dy -96"
+
+[[bindings]]
+keysym = "Down"
+modifiers = ["super", "shift"]
+action = "ipc keyboard-move-by --dx 0 --dy 96"
+
+[[bindings]]
+keysym = "Left"
+modifiers = ["super", "shift"]
+action = "ipc keyboard-move-by --dx -96 --dy 0"
+
+[[bindings]]
+keysym = "Right"
+modifiers = ["super", "shift"]
+action = "ipc keyboard-move-by --dx 96 --dy 0"
+
+[[bindings]]
+keysym = "Return"
+modifiers = ["super", "shift"]
+action = "ipc commit-keyboard-move"
+
+[[bindings]]
+keysym = "Escape"
+modifiers = ["super", "shift"]
+action = "ipc cancel-keyboard-move"

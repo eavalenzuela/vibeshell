@@ -6,9 +6,11 @@
 //! such reader, so it carries its own table here.
 //!
 //! User config: `$XDG_CONFIG_HOME/vibeshell/keybinds.toml` (default
-//! `~/.config/vibeshell/keybinds.toml`). Falls back to hardcoded defaults
-//! (see `default_bindings`) if the file doesn't exist, fails to parse, or
-//! contains zero bindings. Reload is wired to SIGHUP through
+//! `~/.config/vibeshell/keybinds.toml`; `VIBESHELL_KEYBINDS` env overrides).
+//! See `dev/keybinds.toml.example` in the repo for a copy-and-edit starting
+//! point matching the hardcoded defaults verbatim. Falls back to hardcoded
+//! defaults (see `default_bindings`) if the file doesn't exist, fails to
+//! parse, or contains zero bindings. Reload is wired to SIGHUP through
 //! `common::spawn_reload_listener` — edit the config and `vibeshellctl
 //! reload` picks up changes without a vibewm restart.
 //!
