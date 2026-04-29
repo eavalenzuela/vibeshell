@@ -276,6 +276,13 @@ pub enum IpcRequest {
         window: WindowId,
         cluster: ClusterId,
     },
+    /// Move whatever window currently has keyboard focus into `cluster`. The
+    /// daemon resolves the focused window via `WmBackend::focused_window()`
+    /// and then dispatches like `MoveWindowToCluster`. Used by the panel's
+    /// right-click-on-workspace-button gesture (W1c-6).
+    MoveFocusedWindowToCluster {
+        cluster: ClusterId,
+    },
     RenameCluster {
         cluster: ClusterId,
         name: String,

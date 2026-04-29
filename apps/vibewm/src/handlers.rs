@@ -316,7 +316,7 @@ impl WlrLayerShellHandler for Vibewm {
         &mut self,
         surface: WlrLayerSurface,
         wl_output: Option<WlOutput>,
-        _layer: Layer,
+        layer: Layer,
         namespace: String,
     ) {
         let output = wl_output
@@ -324,13 +324,25 @@ impl WlrLayerShellHandler for Vibewm {
             .and_then(Output::from_resource)
             .or_else(|| self.space.outputs().next().cloned());
         let Some(output) = output else {
-            tracing::warn!("layer surface created with no output available; closing");
+            tracing::warn!(
+                namespace,
+                "layer surface created with no output available; closing"
+            );
             surface.send_close();
             return;
         };
+        let output_name = output.name();
         let mut map = layer_map_for_output(&output);
-        if let Err(e) = map.map_layer(&LayerSurface::new(surface, namespace)) {
-            tracing::warn!(?e, "failed to map layer surface");
+        match map.map_layer(&LayerSurface::new(surface, namespace.clone())) {
+            Ok(()) => tracing::info!(
+                namespace,
+                output = %output_name,
+                ?layer,
+                "vibewm: layer surface mapped"
+            ),
+            Err(e) => {
+                tracing::warn!(?e, namespace, output = %output_name, "vibewm: layer surface map failed")
+            }
         }
     }
 
@@ -343,7 +355,14 @@ impl WlrLayerShellHandler for Vibewm {
                 .find(|l| l.layer_surface() == &surface)
                 .cloned();
             if let Some(layer) = layer {
+                let namespace = layer.namespace().to_owned();
+                let output_name = output.name();
                 map.unmap_layer(&layer);
+                tracing::info!(
+                    namespace,
+                    output = %output_name,
+                    "vibewm: layer surface destroyed"
+                );
             }
         }
     }

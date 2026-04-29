@@ -137,6 +137,13 @@ enum IpcCommands {
         window: WindowId,
         cluster: ClusterId,
     },
+    /// Move whatever window currently has keyboard focus into a cluster.
+    /// Convenience for panel right-click and friends — daemon resolves focus
+    /// via the active backend.
+    MoveFocusedWindowToCluster {
+        #[arg(long)]
+        cluster: ClusterId,
+    },
     /// Rename a cluster.
     RenameCluster { cluster: ClusterId, name: String },
     /// Cycle through clusters in MRU order.
@@ -349,6 +356,9 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
         IpcCommands::CancelKeyboardMove => (IpcRequest::CancelKeyboardMove, false),
         IpcCommands::MoveWindowToCluster { window, cluster } => {
             (IpcRequest::MoveWindowToCluster { window, cluster }, false)
+        }
+        IpcCommands::MoveFocusedWindowToCluster { cluster } => {
+            (IpcRequest::MoveFocusedWindowToCluster { cluster }, false)
         }
         IpcCommands::RenameCluster { cluster, name } => {
             (IpcRequest::RenameCluster { cluster, name }, false)
@@ -714,6 +724,25 @@ pub(crate) fn dispatch_ipc_request(
             match result {
                 Ok(()) => Ok(IpcResponse::Ack),
                 Err(message) => Ok(IpcResponse::Error { message }),
+            }
+        }
+        IpcRequest::MoveFocusedWindowToCluster { cluster } => {
+            // Resolve focus through the active backend, then dispatch like
+            // `MoveWindowToCluster`. Not piggy-backing on `dispatch_ipc_request`
+            // recursively because the inner mutation needs the same lock state.
+            let mut backend = wm_factory::connect_default()?;
+            match backend.focused_window()? {
+                Some(window) => {
+                    let result =
+                        with_state_owner(|owner| owner.move_window_to_cluster(window, cluster));
+                    match result {
+                        Ok(()) => Ok(IpcResponse::Ack),
+                        Err(message) => Ok(IpcResponse::Error { message }),
+                    }
+                }
+                None => Ok(IpcResponse::Error {
+                    message: "no window currently focused".into(),
+                }),
             }
         }
         IpcRequest::RenameCluster { cluster, name } => {

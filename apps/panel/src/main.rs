@@ -459,18 +459,14 @@ fn rebuild_workspace_buttons(container: &gtk::Box, workspaces: &[WorkspaceState]
             switch_to_cluster(target_id);
         });
 
-        // Right-click move-focused-to-workspace was wired to swaymsg in W1c-4
-        // and earlier; W1c-5 dropped that direct sway call. The replacement
-        // (a `MoveFocusedWindowToCluster` IPC) lands in W1c-6 once the daemon
-        // exposes one. Right-click currently no-ops.
+        // Right-click moves the currently-focused window into this cluster.
+        // Daemon resolves "currently focused" via the active backend, so this
+        // works under both WM_BACKEND=sway and WM_BACKEND=wlroots.
         let right_click = gtk::GestureClick::new();
         right_click.set_button(gdk::BUTTON_SECONDARY);
         let target_for_move = workspace.id;
         right_click.connect_released(move |_, _, _, _| {
-            tracing::debug!(
-                cluster_id = target_for_move,
-                "panel: right-click move-to-cluster not yet wired (W1c-6)"
-            );
+            move_focused_window_to_cluster(target_for_move);
         });
         button.add_controller(right_click);
 
@@ -514,6 +510,24 @@ fn switch_to_cluster(cluster_id: i64) {
         .spawn()
     {
         tracing::warn!(?error, cluster_id, "failed to spawn vibeshellctl");
+    }
+}
+
+fn move_focused_window_to_cluster(cluster_id: i64) {
+    if let Err(error) = Command::new("vibeshellctl")
+        .args([
+            "ipc",
+            "move-focused-window-to-cluster",
+            "--cluster",
+            &cluster_id.to_string(),
+        ])
+        .spawn()
+    {
+        tracing::warn!(
+            ?error,
+            cluster_id,
+            "failed to spawn vibeshellctl for move-focused"
+        );
     }
 }
 
