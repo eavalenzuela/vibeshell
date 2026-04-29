@@ -20,14 +20,28 @@ impl Vibewm {
             InputEvent::Keyboard { event, .. } => {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
+                let key_state = event.state();
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     keyboard.input::<(), _>(
                         self,
                         event.key_code(),
-                        event.state(),
+                        key_state,
                         serial,
                         time,
-                        |_, _, _| FilterResult::Forward,
+                        |_data, modifiers, keysym_handle| {
+                            // Only intercept on key press, not release —
+                            // bindings fire once per Mod+key chord.
+                            if key_state == smithay::backend::input::KeyState::Pressed
+                                && crate::keybindings::try_dispatch(
+                                    modifiers,
+                                    keysym_handle.modified_sym(),
+                                )
+                            {
+                                FilterResult::Intercept(())
+                            } else {
+                                FilterResult::Forward
+                            }
+                        },
                     );
                 }
             }

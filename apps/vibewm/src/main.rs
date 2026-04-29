@@ -12,6 +12,7 @@ mod grabs;
 mod handlers;
 mod input;
 mod ipc;
+mod keybindings;
 mod model;
 mod state;
 mod winit;
