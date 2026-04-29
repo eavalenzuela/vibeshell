@@ -8,6 +8,7 @@
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::wayland_server::Display;
 
+mod grabs;
 mod handlers;
 mod input;
 mod ipc;

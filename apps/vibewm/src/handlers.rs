@@ -10,6 +10,7 @@ use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::desktop::{
     layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window,
 };
+use smithay::input::pointer::{Focus, GrabStartData as PointerGrabStartData};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
@@ -19,7 +20,7 @@ use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Resource};
-use smithay::utils::Serial;
+use smithay::utils::{Rectangle, Serial};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
@@ -45,6 +46,7 @@ use smithay::{
     delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
 };
 
+use crate::grabs::{handle_resize_commit, MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab};
 use crate::state::{ClientState, Vibewm};
 
 // --- Compositor ---
@@ -78,6 +80,7 @@ impl CompositorHandler for Vibewm {
         }
 
         handle_xdg_commit(&mut self.popups, &self.space, surface);
+        handle_resize_commit(&mut self.space, surface);
         handle_layer_commit(self, surface);
     }
 }
@@ -203,18 +206,93 @@ impl XdgShellHandler for Vibewm {
         surface.send_repositioned(token);
     }
 
-    fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // TODO(W1c): wire interactive move grabs through `crates/wm`'s drag flow.
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let seat = match Seat::<Self>::from_resource(&seat) {
+            Some(s) => s,
+            None => return,
+        };
+        let wl_surface = surface.wl_surface();
+        let Some(start_data) = check_pointer_grab(&seat, wl_surface, serial) else {
+            return;
+        };
+        let Some(window) = self
+            .space
+            .elements()
+            .find(|w| {
+                w.toplevel()
+                    .map(|t| t.wl_surface() == wl_surface)
+                    .unwrap_or(false)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let Some(initial_window_location) = self.space.element_location(&window) else {
+            return;
+        };
+        let Some(pointer) = seat.get_pointer() else {
+            return;
+        };
+        pointer.set_grab(
+            self,
+            MoveSurfaceGrab {
+                start_data,
+                window,
+                initial_window_location,
+            },
+            serial,
+            Focus::Clear,
+        );
     }
 
     fn resize_request(
         &mut self,
-        _surface: ToplevelSurface,
-        _seat: wl_seat::WlSeat,
-        _serial: Serial,
-        _edges: xdg_toplevel::ResizeEdge,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
     ) {
-        // TODO(W1c): wire interactive resize grabs.
+        let seat = match Seat::<Self>::from_resource(&seat) {
+            Some(s) => s,
+            None => return,
+        };
+        let wl_surface = surface.wl_surface();
+        let Some(start_data) = check_pointer_grab(&seat, wl_surface, serial) else {
+            return;
+        };
+        let Some(window) = self
+            .space
+            .elements()
+            .find(|w| {
+                w.toplevel()
+                    .map(|t| t.wl_surface() == wl_surface)
+                    .unwrap_or(false)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let Some(initial_window_location) = self.space.element_location(&window) else {
+            return;
+        };
+        let initial_window_size = window.geometry().size;
+        let Some(pointer) = seat.get_pointer() else {
+            return;
+        };
+
+        surface.with_pending_state(|state| {
+            state.states.set(xdg_toplevel::State::Resizing);
+        });
+        surface.send_pending_configure();
+
+        let resize_edges: ResizeEdge = edges.into();
+        let grab = ResizeSurfaceGrab::start(
+            start_data,
+            window,
+            resize_edges,
+            Rectangle::new(initial_window_location, initial_window_size),
+        );
+        pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
@@ -233,6 +311,25 @@ impl XdgShellHandler for Vibewm {
 }
 
 delegate_xdg_shell!(Vibewm);
+
+/// Verify the pointer is currently grabbing on this surface — otherwise the
+/// move/resize_request is a stale (or malicious) ask we should ignore.
+fn check_pointer_grab(
+    seat: &Seat<Vibewm>,
+    surface: &WlSurface,
+    serial: Serial,
+) -> Option<PointerGrabStartData<Vibewm>> {
+    let pointer = seat.get_pointer()?;
+    if !pointer.has_grab(serial) {
+        return None;
+    }
+    let start_data = pointer.grab_start_data()?;
+    let (focus, _) = start_data.focus.as_ref()?;
+    if !focus.id().same_client_as(&surface.id()) {
+        return None;
+    }
+    Some(start_data)
+}
 
 // --- Xdg decoration ---
 
