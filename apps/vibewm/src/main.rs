@@ -15,6 +15,8 @@ mod ipc;
 mod model;
 mod state;
 mod winit;
+#[cfg(feature = "xwayland")]
+mod xwayland;
 
 use state::Vibewm;
 
@@ -27,6 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     crate::winit::init_winit(&mut event_loop, &mut state)?;
     crate::ipc::init_ipc(&mut event_loop)?;
+    #[cfg(feature = "xwayland")]
+    crate::xwayland::start_xwayland(&mut event_loop, &state);
 
     // Children spawned from this process inherit `WAYLAND_DISPLAY`, so e.g.
     // `vibewm -- vibeshell-panel` runs the panel against this compositor.

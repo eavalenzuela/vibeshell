@@ -12,7 +12,7 @@ use std::sync::Arc;
 use smithay::desktop::{PopupManager, Space, Window, WindowSurfaceType};
 use smithay::input::{Seat, SeatState};
 use smithay::reexports::calloop::generic::Generic;
-use smithay::reexports::calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction};
+use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
@@ -25,6 +25,10 @@ use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::socket::ListeningSocketSource;
+#[cfg(feature = "xwayland")]
+use smithay::wayland::xwayland_shell::XWaylandShellState;
+#[cfg(feature = "xwayland")]
+use smithay::xwayland::X11Wm;
 use wm::layout::WindowId;
 
 use crate::model::VibewmModel;
@@ -33,6 +37,7 @@ pub struct Vibewm {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
+    pub loop_handle: LoopHandle<'static, Vibewm>,
     pub loop_signal: LoopSignal,
 
     pub space: Space<Window>,
@@ -66,10 +71,26 @@ pub struct Vibewm {
     /// Last known logical position for each window, captured before unmapping
     /// on cluster switch so we can re-map at the same spot on reactivation.
     pub last_known_position: HashMap<WindowId, (i32, i32)>,
+
+    /// Holds the xwayland_shell_v1 protocol global so X11 clients can
+    /// associate their wl_surface with their X11 window. Initialized
+    /// regardless of whether XWayland is actually spawned yet.
+    #[cfg(feature = "xwayland")]
+    pub xwayland_shell_state: XWaylandShellState,
+
+    /// The XWayland-side window manager, populated after `XWayland::spawn`
+    /// emits its `Ready` event in `start_xwayland`. None until then.
+    #[cfg(feature = "xwayland")]
+    pub xwm: Option<X11Wm>,
+
+    /// X11 display number XWayland is serving on (e.g. `Some(0)` for `:0`).
+    /// Used to derive the `DISPLAY` env var for X11 child processes.
+    #[cfg(feature = "xwayland")]
+    pub xdisplay: Option<u32>,
 }
 
 impl Vibewm {
-    pub fn new(event_loop: &mut EventLoop<Self>, display: Display<Self>) -> Self {
+    pub fn new(event_loop: &mut EventLoop<'static, Self>, display: Display<Self>) -> Self {
         let start_time = std::time::Instant::now();
         let dh = display.handle();
 
@@ -87,13 +108,18 @@ impl Vibewm {
             .expect("add_keyboard failed");
         seat.add_pointer();
 
+        #[cfg(feature = "xwayland")]
+        let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
+
         let socket_name = Self::init_wayland_listener(display, event_loop);
+        let loop_handle = event_loop.handle();
         let loop_signal = event_loop.get_signal();
 
         Self {
             start_time,
             socket_name,
             display_handle: dh,
+            loop_handle,
             loop_signal,
             space: Space::default(),
             popups: PopupManager::default(),
@@ -109,10 +135,19 @@ impl Vibewm {
             event_subscribers: Vec::new(),
             model: VibewmModel::new(),
             last_known_position: HashMap::new(),
+            #[cfg(feature = "xwayland")]
+            xwayland_shell_state,
+            #[cfg(feature = "xwayland")]
+            xwm: None,
+            #[cfg(feature = "xwayland")]
+            xdisplay: None,
         }
     }
 
-    fn init_wayland_listener(display: Display<Self>, event_loop: &mut EventLoop<Self>) -> OsString {
+    fn init_wayland_listener(
+        display: Display<Self>,
+        event_loop: &mut EventLoop<'static, Self>,
+    ) -> OsString {
         let listening_socket =
             ListeningSocketSource::new_auto().expect("ListeningSocketSource::new_auto failed");
         let socket_name = listening_socket.socket_name().to_os_string();

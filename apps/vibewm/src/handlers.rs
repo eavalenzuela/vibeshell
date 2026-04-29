@@ -57,9 +57,18 @@ impl CompositorHandler for Vibewm {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        // XWayland clients carry smithay's `XWaylandClientData` rather than
+        // vibewm's own `ClientState`. Check both before bailing.
+        #[cfg(feature = "xwayland")]
+        {
+            use smithay::xwayland::XWaylandClientData;
+            if let Some(state) = client.get_data::<XWaylandClientData>() {
+                return &state.compositor_state;
+            }
+        }
         &client
             .get_data::<ClientState>()
-            .expect("client without ClientState")
+            .expect("client without ClientState or XWaylandClientData")
             .compositor_state
     }
 
@@ -482,4 +491,169 @@ fn handle_layer_commit(state: &mut Vibewm, surface: &WlSurface) {
             map.arrange();
         }
     }
+}
+
+// --- XWayland ---
+//
+// X11 client integration: an `X11Wm` (the X11-side window manager) is owned
+// by `Vibewm::xwm` once `xwayland::start_xwayland` finishes its handshake.
+// Smithay routes X server events through `XwmHandler` so we can map X11
+// surfaces into the same `Space<Window>` as xdg toplevels.
+//
+// Override-redirect windows (X tooltips/popups that bypass the WM) are mapped
+// at their requested location and never have grab/configure logic; they're
+// effectively passthrough.
+
+#[cfg(feature = "xwayland")]
+mod xwm_handler {
+    use smithay::delegate_xwayland_shell;
+    use smithay::desktop::Window;
+    use smithay::utils::{Logical, Rectangle};
+    use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
+    use smithay::xwayland::xwm::{Reorder, ResizeEdge as X11ResizeEdge, XwmId};
+    use smithay::xwayland::{X11Surface, X11Wm, XwmHandler};
+
+    use crate::state::Vibewm;
+
+    impl XwmHandler for Vibewm {
+        fn xwm_state(&mut self, _xwm: XwmId) -> &mut X11Wm {
+            self.xwm
+                .as_mut()
+                .expect("xwm_state called before X11Wm attached")
+        }
+
+        fn new_window(&mut self, _xwm: XwmId, window: X11Surface) {
+            tracing::info!(?window, "vibewm: new X11 window");
+        }
+
+        fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {
+            // Override-redirect surfaces (X tooltips, popups, etc.) ride
+            // outside the WM model. We don't track them in `model` — they
+            // appear in the Space when smithay maps them via the surface
+            // commit path.
+        }
+
+        fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
+            // Tell the X11 server to render the window. After this, the X11
+            // surface emits `map_window_notify` once mapped on screen.
+            if let Err(e) = window.set_mapped(true) {
+                tracing::warn!(?e, "vibewm: X11 set_mapped(true) failed");
+                return;
+            }
+            let win = Window::new_x11_window(window);
+            let id = self.model.register_window(win.clone());
+            self.space.map_element(win, (0, 0), false);
+            self.last_known_position.insert(id, (0, 0));
+            self.broadcast_workspace_or_window();
+            tracing::info!(window_id = id, "vibewm: X11 window mapped");
+        }
+
+        fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
+            let geometry = window.geometry();
+            let win = Window::new_x11_window(window);
+            self.space
+                .map_element(win, (geometry.loc.x, geometry.loc.y), false);
+        }
+
+        fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
+            // Find and unmap from the space; remove from the model so the
+            // daemon's next snapshot drops it.
+            let target_window = self
+                .space
+                .elements()
+                .find(|w| matches!(w.x11_surface(), Some(s) if s == &window))
+                .cloned();
+            if let Some(win) = target_window {
+                self.space.unmap_elem(&win);
+                if let Some((id, _)) = self
+                    .model
+                    .windows
+                    .iter()
+                    .find(|(_, w)| w.x11_surface().map(|s| s == &window).unwrap_or(false))
+                {
+                    let id = *id;
+                    self.last_known_position.remove(&id);
+                    self.model.unregister_window(id);
+                }
+            }
+            self.broadcast_workspace_or_window();
+        }
+
+        fn destroyed_window(&mut self, _xwm: XwmId, _window: X11Surface) {
+            // unmapped_window already pruned the model + space. Nothing to do
+            // here for now.
+        }
+
+        fn configure_request(
+            &mut self,
+            _xwm: XwmId,
+            window: X11Surface,
+            x: Option<i32>,
+            y: Option<i32>,
+            w: Option<u32>,
+            h: Option<u32>,
+            _reorder: Option<Reorder>,
+        ) {
+            // Honor what the client asked for. Daemon's layout engine will
+            // override on the next ApplyLayoutOps tick if it wants.
+            let mut geo = window.geometry();
+            if let Some(x) = x {
+                geo.loc.x = x;
+            }
+            if let Some(y) = y {
+                geo.loc.y = y;
+            }
+            if let Some(w) = w {
+                geo.size.w = w as i32;
+            }
+            if let Some(h) = h {
+                geo.size.h = h as i32;
+            }
+            let _ = window.configure(Some(geo));
+        }
+
+        fn configure_notify(
+            &mut self,
+            _xwm: XwmId,
+            window: X11Surface,
+            geometry: Rectangle<i32, Logical>,
+            _above: Option<u32>,
+        ) {
+            // Server notified us the window's geometry changed. Reposition it
+            // in the space if we have a tracked Window for this surface.
+            let target = self
+                .space
+                .elements()
+                .find(|w| matches!(w.x11_surface(), Some(s) if s == &window))
+                .cloned();
+            if let Some(win) = target {
+                self.space
+                    .map_element(win, (geometry.loc.x, geometry.loc.y), false);
+            }
+        }
+
+        fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {
+            // TODO(W1c-10+): wire X11 move grabs through the existing
+            // MoveSurfaceGrab. X11 doesn't naturally produce a wayland
+            // PointerGrabStartData, so this needs a synthesized start_data.
+        }
+
+        fn resize_request(
+            &mut self,
+            _xwm: XwmId,
+            _window: X11Surface,
+            _button: u32,
+            _resize_edge: X11ResizeEdge,
+        ) {
+            // TODO(W1c-10+): same caveat as move_request.
+        }
+    }
+
+    impl XWaylandShellHandler for Vibewm {
+        fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
+            &mut self.xwayland_shell_state
+        }
+    }
+
+    delegate_xwayland_shell!(Vibewm);
 }

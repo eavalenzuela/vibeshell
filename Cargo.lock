@@ -684,6 +684,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0aafbcdb8afc29c1a7ee5fbe53b5d62f4565b35a042a662ca9fecd0b54dae6f4"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2247,6 +2256,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
 name = "semver"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2420,6 +2435,7 @@ dependencies = [
  "cursor-icon",
  "downcast-rs",
  "drm-fourcc",
+ "encoding_rs",
  "errno",
  "gl_generator",
  "indexmap",
@@ -2428,6 +2444,7 @@ dependencies = [
  "profiling",
  "rand 0.9.4",
  "rustix 1.1.4",
+ "scopeguard",
  "sha2",
  "smallvec",
  "tempfile",
@@ -2441,6 +2458,7 @@ dependencies = [
  "wayland-protocols-wlr",
  "wayland-server",
  "winit",
+ "x11rb",
  "xkbcommon",
 ]
 
