@@ -360,12 +360,22 @@ fn open_drm_device(
     .map_err(|e| format!("DrmCompositor::new: {e}"))?;
 
     // Register the DRM event source — fires VBlanks that we use to drive
-    // rendering.
+    // rendering. On VBlank we ack the previous frame (`frame_submitted`)
+    // and then kick off the next render.
     use smithay::reexports::calloop::LoopHandle;
     let loop_handle: LoopHandle<'static, Vibewm> = state.loop_handle.clone();
     let drm_node_for_handler = drm_node;
     loop_handle.insert_source(drm_notifier, move |event, _, state| match event {
         DrmEvent::VBlank(_crtc) => {
+            if let Some(udev) = state.udev.as_mut() {
+                if let Some(device) = udev.devices.get_mut(&drm_node_for_handler) {
+                    if let Some(comp) = device.drm_compositor.as_mut() {
+                        if let Err(e) = comp.frame_submitted() {
+                            warn!(?e, "udev: frame_submitted failed");
+                        }
+                    }
+                }
+            }
             render_node(state, drm_node_for_handler);
         }
         DrmEvent::Error(e) => warn!(?e, "udev: DRM error event"),
@@ -386,8 +396,9 @@ fn open_drm_device(
             },
         );
 
-    // Kick off the first frame so we see something on screen.
-    schedule_initial_frame(state, drm_node);
+    // Kick off the first frame via the same retry path used when
+    // `EmptyFrame` fires later.
+    schedule_retry_frame(state, drm_node);
 
     Ok(())
 }
@@ -407,8 +418,13 @@ fn egl_from_gbm(
 }
 
 /// Render one frame for `drm_node` and queue it on the DRM compositor.
-/// Called from the VBlank handler — when this returns, the compositor will
-/// kick the buffer out and another VBlank will fire when it's done.
+/// Called from VBlank handlers (driven by the DrmEvent stream) and from the
+/// retry timer when the previous render produced no damage.
+///
+/// `frame_submitted()` is NOT called here — it only ack's a previously
+/// queued frame, so it belongs in the VBlank handler that received the
+/// completion notice. Calling it here would double-ack and confuse the
+/// compositor's internal state.
 fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
     let Some(udev) = state.udev.as_mut() else {
         return;
@@ -420,12 +436,6 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         return;
     };
 
-    // Acknowledge the previous frame submission so smithay can recycle the
-    // buffer.
-    if let Err(e) = comp.frame_submitted() {
-        warn!(?e, "udev: frame_submitted failed");
-    }
-
     // Build render elements from the smithay Space. Three args: renderer,
     // output, alpha (1.0 = fully opaque).
     let elements = state
@@ -433,25 +443,47 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         .render_elements_for_output(&mut device.renderer, &device.output, 1.0)
         .unwrap_or_default();
 
-    // Color32F::from([f32; 4]) is the standard way to convert RGBA literals.
     use smithay::backend::renderer::Color32F;
-    let res = comp.render_frame::<_, _>(
+    let render_res = comp.render_frame::<_, _>(
         &mut device.renderer,
         &elements,
         Color32F::from([0.05, 0.05, 0.07, 1.0]),
         smithay::backend::drm::compositor::FrameFlags::DEFAULT,
     );
-    match res {
-        Ok(_render_output) => {
-            if let Err(e) = comp.queue_frame(()) {
-                warn!(?e, "udev: queue_frame failed");
-            }
+    let queue_outcome = match render_res {
+        Ok(_) => comp.queue_frame(()),
+        Err(e) => {
+            warn!(?e, "udev: render_frame failed");
+            // Treat render failure same as empty: retry shortly.
+            Err(smithay::backend::drm::compositor::FrameError::EmptyFrame)
         }
-        Err(e) => warn!(?e, "udev: render_frame failed"),
+    };
+
+    use smithay::backend::drm::compositor::FrameError;
+    match queue_outcome {
+        Ok(()) => {
+            // Frame queued. Next VBlank will tick frame_submitted +
+            // re-render via the DrmEvent::VBlank handler.
+        }
+        Err(FrameError::EmptyFrame) => {
+            // Documented benign signal: nothing to commit. Schedule a
+            // retry roughly one retrace period out so we'll re-check
+            // when a client commits damage.
+            schedule_retry_frame(state, drm_node);
+        }
+        Err(e) => {
+            warn!(?e, "udev: queue_frame failed");
+        }
     }
 
     // Tell every mapped window we've shown a frame, so wayland clients
     // know to release their buffers and start the next one.
+    let Some(udev) = state.udev.as_ref() else {
+        return;
+    };
+    let Some(device) = udev.devices.get(&drm_node) else {
+        return;
+    };
     let now = state.start_time.elapsed();
     state.space.elements().for_each(|w| {
         w.send_frame(&device.output, now, Some(Duration::ZERO), |_, _| {
@@ -460,13 +492,14 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
     });
 }
 
-/// Schedule the first frame after device init. We can't render directly from
-/// `open_drm_device` because the DRM compositor isn't ready until after its
-/// first commit; queue a calloop timer to kick it on the next loop tick.
-fn schedule_initial_frame(state: &mut Vibewm, drm_node: DrmNode) {
+/// Schedule another `render_node` attempt one retrace period out. Used when
+/// `queue_frame` returned `EmptyFrame` — without this, an empty render would
+/// stop driving the loop entirely (no buffer in flight = no VBlank).
+fn schedule_retry_frame(state: &Vibewm, drm_node: DrmNode) {
     let timer = Timer::from_duration(Duration::from_millis(16));
     let _ = state.loop_handle.insert_source(timer, move |_, _, state| {
         render_node(state, drm_node);
         TimeoutAction::Drop
     });
 }
+
