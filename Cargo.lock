@@ -1424,7 +1424,6 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-words",
- "sway",
  "tracing",
  "xdg",
 ]
@@ -1906,7 +1905,7 @@ dependencies = [
  "gtk4",
  "gtk4-layer-shell",
  "libadwaita",
- "sway",
+ "serde_json",
  "tracing",
  "zbus",
 ]

@@ -22,27 +22,10 @@ use std::time::Duration;
 
 use swayipc::{Connection, EventType, Fallible, Node};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceState {
-    pub id: i64,
-    pub num: Option<i32>,
-    pub name: String,
-    pub output: String,
-    pub focused: bool,
-    pub visible: bool,
-    pub urgent: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PanelState {
-    pub workspaces: Vec<WorkspaceState>,
-    pub focused_title: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PanelUpdate {
-    Snapshot(PanelState),
-}
+// `PanelState`/`WorkspaceState`/`PanelUpdate` moved to `common::panel` in
+// W1c-5 (they're backend-neutral now). Re-exported here so existing
+// consumers (overlay's `sway::*` imports) keep working.
+pub use common::panel::{PanelState, PanelUpdate, WorkspaceState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwaySignal {

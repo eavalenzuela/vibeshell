@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+mod daemon_source;
 mod status;
 
 use adw::prelude::*;
@@ -41,10 +42,7 @@ impl RuntimePanelConfig {
         }
     }
 }
-use sway::{PanelState, PanelUpdate, WorkspaceState};
-
-const SWAY_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
-const SWAY_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
+use common::panel::{PanelState, PanelUpdate, WorkspaceState};
 
 fn report_config_load_error(error: &config::ConfigLoadError) {
     tracing::warn!(%error, "failed to load config, using defaults");
@@ -251,44 +249,15 @@ fn build_ui(
     let (status_sender, status_receiver): (mpsc::Sender<PanelStatus>, mpsc::Receiver<PanelStatus>) =
         mpsc::channel();
 
-    thread::spawn({
-        let runtime_config = Arc::clone(&runtime_config);
-        move || {
-            let mut backoff = SWAY_CONNECT_INITIAL_BACKOFF;
-
-            loop {
-                match sway::SwayClient::connect() {
-                    Ok(client) => {
-                        let debounce_ms = runtime_config
-                            .lock()
-                            .expect("runtime config poisoned")
-                            .sway_event_debounce_ms
-                            .max(20);
-                        tracing::info!(debounce_ms, "connected to sway ipc");
-                        if let Err(error) =
-                            client.run_listener(sender.clone(), Duration::from_millis(debounce_ms))
-                        {
-                            tracing::warn!(?error, "sway listener exited; retrying connection");
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                        ?error,
-                        retry_ms = backoff.as_millis(),
-                        "unable to connect to sway ipc; ensure sway is running and SWAYSOCK is set"
-                    );
-                        eprintln!(
-                        "panel: sway IPC unavailable. Start sway first (or export SWAYSOCK), retrying in {} ms.",
-                        backoff.as_millis()
-                    );
-                    }
-                }
-
-                thread::sleep(backoff);
-                backoff = (backoff * 2).min(SWAY_CONNECT_MAX_BACKOFF);
-            }
-        }
-    });
+    {
+        let poll_ms = runtime_config
+            .lock()
+            .expect("runtime config poisoned")
+            .sway_event_debounce_ms
+            .max(20);
+        tracing::info!(poll_ms, "panel: starting daemon poll");
+        daemon_source::spawn_daemon_listener(sender.clone(), Duration::from_millis(poll_ms));
+    }
 
     thread::spawn({
         let runtime_config = Arc::clone(&runtime_config);
@@ -485,16 +454,23 @@ fn rebuild_workspace_buttons(container: &gtk::Box, workspaces: &[WorkspaceState]
             button.add_css_class("workspace-urgent");
         }
 
-        let target_name = workspace.name.clone();
+        let target_id = workspace.id;
         button.connect_clicked(move |_| {
-            switch_to_workspace(&target_name);
+            switch_to_cluster(target_id);
         });
 
+        // Right-click move-focused-to-workspace was wired to swaymsg in W1c-4
+        // and earlier; W1c-5 dropped that direct sway call. The replacement
+        // (a `MoveFocusedWindowToCluster` IPC) lands in W1c-6 once the daemon
+        // exposes one. Right-click currently no-ops.
         let right_click = gtk::GestureClick::new();
         right_click.set_button(gdk::BUTTON_SECONDARY);
-        let target_for_move = workspace.name.clone();
+        let target_for_move = workspace.id;
         right_click.connect_released(move |_, _, _, _| {
-            move_focused_window_to_workspace(&target_for_move);
+            tracing::debug!(
+                cluster_id = target_for_move,
+                "panel: right-click move-to-cluster not yet wired (W1c-6)"
+            );
         });
         button.add_controller(right_click);
 
@@ -523,20 +499,21 @@ fn format_workspace_label(workspace: &WorkspaceState) -> String {
     format!("{status}{display_name}{urgent}")
 }
 
-fn switch_to_workspace(name: &str) {
-    if let Err(error) = Command::new("swaymsg").args(["workspace", name]).spawn() {
-        tracing::warn!(?error, workspace = name, "failed to switch workspace");
-    }
-}
-
-fn move_focused_window_to_workspace(name: &str) {
-    let argument = format!("move container to workspace {name}");
-    if let Err(error) = Command::new("swaymsg").arg(&argument).spawn() {
-        tracing::warn!(
-            ?error,
-            workspace = name,
-            "failed to move focused window to workspace"
-        );
+fn switch_to_cluster(cluster_id: i64) {
+    // Dispatch via vibeshellctl so the daemon picks the right backend
+    // (sway → swayipc, wlroots → vibewm-control). The daemon's
+    // `IpcRequest::ActivateCluster` handles the full flow including focus
+    // handoff.
+    if let Err(error) = Command::new("vibeshellctl")
+        .args([
+            "ipc",
+            "activate-cluster",
+            "--cluster",
+            &cluster_id.to_string(),
+        ])
+        .spawn()
+    {
+        tracing::warn!(?error, cluster_id, "failed to spawn vibeshellctl");
     }
 }
 

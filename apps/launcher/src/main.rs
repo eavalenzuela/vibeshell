@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,9 +15,6 @@ use gtk::glib;
 use gtk4 as gtk;
 use gtk4_layer_shell::{self as layer_shell, LayerShell};
 use xdg::DesktopEntry;
-
-const SWAY_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
-const SWAY_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
 
 fn report_config_load_error(error: &config::ConfigLoadError) {
     tracing::warn!(%error, "failed to load config, using defaults");
@@ -397,8 +393,6 @@ fn main() {
         tracing::warn!(?error, "failed to read desktop entries");
         Vec::new()
     });
-
-    spawn_sway_dependency_probe();
 
     let app = adw::Application::builder()
         .application_id("com.vibeshell.launcher")
@@ -1073,35 +1067,6 @@ fn parse_terminal_command(configured: &str) -> Vec<String> {
     } else {
         parsed
     }
-}
-
-fn spawn_sway_dependency_probe() {
-    thread::spawn(|| {
-        let mut backoff = SWAY_CONNECT_INITIAL_BACKOFF;
-
-        loop {
-            match sway::SwayClient::connect() {
-                Ok(_) => {
-                    tracing::info!("launcher connected to sway ipc");
-                    return;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        ?error,
-                        retry_ms = backoff.as_millis(),
-                        "launcher could not connect to sway ipc; ensure sway is running and SWAYSOCK is set"
-                    );
-                    eprintln!(
-                        "launcher: sway IPC unavailable. Start sway first (or export SWAYSOCK), retrying in {} ms.",
-                        backoff.as_millis()
-                    );
-                }
-            }
-
-            thread::sleep(backoff);
-            backoff = (backoff * 2).min(SWAY_CONNECT_MAX_BACKOFF);
-        }
-    });
 }
 
 #[cfg(test)]
