@@ -1,0 +1,28 @@
+[package]
+name = "vibewm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { path = "../../crates/common" }
+wm = { path = "../../crates/wm" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dependencies.smithay]
+version = "0.7"
+default-features = false
+features = [
+    "backend_winit",
+    "desktop",
+    "renderer_gl",
+    "wayland_frontend",
+]
+
+# Smithay's calloop `Generic` source requires `unsafe { display.get_mut() }`
+# during wayland-server dispatch, and `std::env::set_var` is `unsafe` on newer
+# Rust editions. Inheriting the workspace `forbid(unsafe_code)` would prevent
+# either, so this crate opts into a `deny` (overridable by-block) instead.
+[lints.rust]
+unsafe_code = "deny"

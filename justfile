@@ -34,6 +34,16 @@ smoke-binaries:
     cargo build -p notifd --bins
     cargo build -p cheatsheet --bins
     cargo build -p vibeshellctl --bins
+    cargo build -p vibewm --bins
+
+# vibewm dev — boots the wlroots-style compositor in a winit window.
+# Pass a "-- <cmd>" suffix to spawn a client into it on startup.
+# Examples:
+#   just run-vibewm
+#   just run-vibewm -- weston-terminal
+#   just run-vibewm -- vibeshell-panel
+run-vibewm *args:
+    cargo run -p vibewm -- {{args}}
 
 test:
     cargo test --workspace

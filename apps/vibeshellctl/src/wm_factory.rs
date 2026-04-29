@@ -11,7 +11,7 @@ pub fn connect_default() -> Result<Box<dyn WmBackend>, BackendError> {
     match kind.as_str() {
         "sway" => Ok(Box::new(sway::SwayBackend::connect()?)),
         "wlroots" => Err(BackendError::NotImplemented(
-            "wlroots backend lands in Phase 8 W1b".into(),
+            "wlroots: `apps/vibewm` runs but daemon control-plane bridge is Phase 8 W1c".into(),
         )),
         other => Err(BackendError::Other(format!(
             "unknown WM_BACKEND `{other}` (expected `sway` or `wlroots`)"
