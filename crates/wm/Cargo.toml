@@ -1,14 +1,13 @@
 [package]
-name = "sway"
+name = "wm"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 common = { path = "../common" }
-swayipc = "3"
+thiserror = "1"
 tracing.workspace = true
-wm = { path = "../wm" }
 
 [lints]
 workspace = true

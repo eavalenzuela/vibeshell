@@ -14,10 +14,15 @@ use serde::Serialize;
 use serde_json::json;
 use tracing::{info, warn};
 
-use swayipc::{Connection, EventType, Node};
+// `ingest_sway_event_metadata` (dump-state debug probe) still touches swayipc
+// directly; the rest of the daemon/CLI control plane goes through `wm::WmBackend`.
+// TODO(W1c): replace with a backend-neutral event probe so dump-state works
+// against any WM backend.
+use swayipc::{Connection, EventType};
 
 mod daemon;
 mod state_store;
+mod wm_factory;
 use state_store::with_state_owner;
 
 #[derive(Debug, Parser)]
@@ -430,7 +435,9 @@ pub(crate) fn dispatch_ipc_request(
     request: IpcRequest,
 ) -> Result<IpcResponse, Box<dyn std::error::Error>> {
     if needs_sway_ingest(&request) {
-        with_state_owner(|owner| owner.ingest_sway_facts())?;
+        let mut backend = wm_factory::connect_default()?;
+        let facts = backend.snapshot()?;
+        with_state_owner(|owner| owner.ingest_facts(facts));
     }
 
     match request {
@@ -608,24 +615,18 @@ pub(crate) fn dispatch_ipc_request(
             Ok(IpcResponse::Ack)
         }
         IpcRequest::CreateCluster { name, x, y } => {
-            let mut conn = Connection::new()?;
-            let escaped = name.replace('"', "\\\"");
-            // Switch to the new workspace so it exists when we ingest.
-            // Don't combine with back_and_forth — Sway GC's empty workspaces
-            // immediately, so the workspace must be focused during ingest.
-            let cmd = format!("workspace \"{escaped}\"");
-            for reply in conn.run_command(&cmd)? {
-                if let Err(e) = reply {
-                    tracing::warn!(?e, "sway workspace create warning");
-                }
+            // Switch to the new workspace so it exists when we ingest. Sway GC's
+            // empty workspaces immediately, so the workspace must be focused
+            // during ingest — back-and-forth happens after.
+            let mut backend = wm_factory::connect_default()?;
+            if let Err(e) = backend.create_named_workspace(&name) {
+                tracing::warn!(?e, "WM workspace create warning");
             }
-            with_state_owner(|owner| owner.ingest_sway_facts())?;
+            let facts = backend.snapshot()?;
+            with_state_owner(|owner| owner.ingest_facts(facts));
             let result = with_state_owner(|owner| owner.set_cluster_position_by_name(&name, x, y));
-            // Switch back to the previous workspace after ingest captured the new one.
-            for reply in conn.run_command("workspace back_and_forth")? {
-                if let Err(e) = reply {
-                    tracing::warn!(?e, "sway workspace switch-back warning");
-                }
+            if let Err(e) = backend.back_and_forth_workspace() {
+                tracing::warn!(?e, "WM workspace switch-back warning");
             }
             match result {
                 Ok(()) => Ok(IpcResponse::Ack),
@@ -733,50 +734,20 @@ pub(crate) fn dispatch_ipc_request(
 }
 
 fn focus_window(window_id: WindowId) -> Result<(), Box<dyn std::error::Error>> {
-    let mut connection = Connection::new()?;
-    let command = format!("[con_id={window_id}] focus");
-    for reply in connection.run_command(&command)? {
-        if let Err(error) = reply {
-            return Err(format!("sway rejected focus command `{command}`: {error}").into());
-        }
-    }
+    let mut backend = wm_factory::connect_default()?;
+    backend.focus_window(window_id)?;
     Ok(())
 }
 
 fn activate_cluster(cluster_id: ClusterId) -> Result<(), Box<dyn std::error::Error>> {
-    let mut connection = Connection::new()?;
-    let workspaces = connection.get_workspaces()?;
-    let workspace = workspaces
-        .into_iter()
-        .find(|workspace| workspace.id as ClusterId == cluster_id)
-        .ok_or_else(|| format!("cluster {cluster_id} not found"))?;
-
-    let command = if workspace.num >= 0 {
-        format!("workspace number {}", workspace.num)
-    } else {
-        let escaped = workspace.name.replace('"', "\\\"");
-        format!("workspace \"{escaped}\"")
-    };
-
-    for reply in connection.run_command(&command)? {
-        if let Err(error) = reply {
-            return Err(format!("sway rejected activation command `{command}`: {error}").into());
-        }
-    }
-
+    let mut backend = wm_factory::connect_default()?;
+    backend.activate_cluster(cluster_id)?;
     Ok(())
 }
 
 fn send_overview_transition() -> Result<(), Box<dyn std::error::Error>> {
-    let mut connection = Connection::new()?;
-    for reply in connection.run_command("workspace back_and_forth")? {
-        if let Err(error) = reply {
-            return Err(format!(
-                "sway rejected overview transition command `workspace back_and_forth`: {error}"
-            )
-            .into());
-        }
-    }
+    let mut backend = wm_factory::connect_default()?;
+    backend.back_and_forth_workspace()?;
     Ok(())
 }
 
@@ -931,46 +902,13 @@ fn deterministic_focus_plan(
 }
 
 fn query_focused_window_id() -> Result<Option<WindowId>, Box<dyn std::error::Error>> {
-    let mut connection = Connection::new()?;
-    let tree = connection.get_tree()?;
-    Ok(find_focused_window_id(&tree))
-}
-
-fn find_focused_window_id(node: &Node) -> Option<WindowId> {
-    if node.focused && node.pid.is_some() {
-        return Some(node.id as WindowId);
-    }
-
-    for child in &node.nodes {
-        if let Some(window_id) = find_focused_window_id(child) {
-            return Some(window_id);
-        }
-    }
-
-    for child in &node.floating_nodes {
-        if let Some(window_id) = find_focused_window_id(child) {
-            return Some(window_id);
-        }
-    }
-
-    None
+    let mut backend = wm_factory::connect_default()?;
+    Ok(backend.focused_window()?)
 }
 
 fn reload() -> Result<(), Box<dyn std::error::Error>> {
-    let request = IpcRequest::ReloadConfig;
-    let sway_command = match request {
-        IpcRequest::ReloadConfig => "reload",
-        _ => return Err("unexpected IPC request for reload command".into()),
-    };
-
-    let mut connection = Connection::new()?;
-    let replies = connection.run_command(sway_command)?;
-
-    for reply in replies {
-        if let Err(error) = reply {
-            return Err(format!("sway rejected reload command: {error}").into());
-        }
-    }
+    let mut backend = wm_factory::connect_default()?;
+    backend.reload_wm_config()?;
 
     // Signal daemon (same binary name) so it reloads config via SIGHUP.
     let _ = send_reload_signal("vibeshellctl");
@@ -979,7 +917,7 @@ fn reload() -> Result<(), Box<dyn std::error::Error>> {
         send_reload_signal(component.process_name())?;
     }
 
-    println!("reload requested (sway + vibeshell components + daemon)");
+    println!("reload requested (WM + vibeshell components + daemon)");
     Ok(())
 }
 
@@ -997,8 +935,10 @@ fn send_reload_signal(process_name: &str) -> Result<(), Box<dyn std::error::Erro
 }
 
 fn status() -> Result<(), Box<dyn std::error::Error>> {
-    let sway_running = Connection::new().is_ok();
-    println!("sway: {}", running_label(sway_running));
+    let wm_running = wm_factory::connect_default()
+        .map(|mut b| b.is_alive())
+        .unwrap_or(false);
+    println!("wm: {}", running_label(wm_running));
 
     for component in [Component::Panel, Component::Launcher, Component::Notifd] {
         let running = is_running(component.process_name())?;
@@ -1035,15 +975,8 @@ fn restart(component: Component) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn logout() -> Result<(), Box<dyn std::error::Error>> {
-    let mut connection = Connection::new()?;
-    let replies = connection.run_command("exit")?;
-
-    for reply in replies {
-        if let Err(error) = reply {
-            return Err(format!("sway rejected exit command: {error}").into());
-        }
-    }
-
+    let mut backend = wm_factory::connect_default()?;
+    backend.exit_session()?;
     println!("logout requested");
     Ok(())
 }
@@ -1090,7 +1023,9 @@ fn logs(component: Component) -> Result<(), Box<dyn std::error::Error>> {
 fn dump_state(pretty: bool) -> Result<(), Box<dyn std::error::Error>> {
     log_ipc_request(IpcRequestType::GetState, "daemon-snapshot", None, None);
     let events = ingest_sway_event_metadata()?;
-    with_state_owner(|owner| owner.ingest_sway_facts())?;
+    let mut backend = wm_factory::connect_default()?;
+    let facts = backend.snapshot()?;
+    with_state_owner(|owner| owner.ingest_facts(facts));
     let state = with_state_owner(|owner| {
         owner.mutate_get_state();
         owner.state()

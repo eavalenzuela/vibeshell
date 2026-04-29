@@ -1,5 +1,5 @@
 use super::{exclusion_reason, Window, WindowRole, WindowState};
-use sway::backend::LayoutExclusionReason;
+use wm::layout::LayoutExclusionReason;
 
 fn scratchpad_window() -> Window {
     Window {

@@ -1,4 +1,20 @@
-pub mod backend;
+//! Sway-specific WM backend.
+//!
+//! Implements `wm::WmBackend` against `swayipc`. Also still exposes the
+//! `SwayClient` panel-snapshot adapter used by `apps/panel` and the event
+//! stream helper used by `apps/overlay` (these are wayland clients consuming
+//! Sway IPC directly; they will move to a vibeshell IPC under wlroots).
+
+pub mod sway_backend;
+
+/// Backwards-compatible re-export of the (now backend-agnostic) layout module.
+/// Existing callers `use sway::backend::{ClusterLayoutInput, ...};` keep
+/// working until they migrate to `wm::*`.
+pub mod backend {
+    pub use wm::layout::*;
+}
+
+pub use sway_backend::SwayBackend;
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;

@@ -9,6 +9,7 @@ members = [
   "crates/common",
   "crates/config",
   "crates/sway",
+  "crates/wm",
   "crates/xdg",
 ]
 resolver = "2"

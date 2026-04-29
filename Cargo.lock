@@ -1612,6 +1612,7 @@ dependencies = [
  "common",
  "swayipc",
  "tracing",
+ "wm",
 ]
 
 [[package]]
@@ -1925,6 +1926,7 @@ dependencies = [
  "sway",
  "swayipc",
  "tracing",
+ "wm",
 ]
 
 [[package]]
@@ -2297,6 +2299,15 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "wm"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]

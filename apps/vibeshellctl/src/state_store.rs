@@ -62,15 +62,15 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use common::contracts::{
-    CanvasState, Cluster, ClusterId, ContextStripDirection, OutputState, Viewport, Window,
-    WindowId, WindowRole, WindowState, ZoomLevel,
+    CanvasState, ClusterId, ContextStripDirection, Viewport, Window, WindowId, WindowRole,
+    WindowState, ZoomLevel,
 };
 use common::persistence::{OverviewPersistence, PersistedOverviewState};
 use config::schema::AssignmentHint;
 use serde::Serialize;
 use serde_json::json;
-use swayipc::Connection;
 use tracing::info;
+use wm::facts::WmFacts;
 
 static STATE_OWNER: OnceLock<Mutex<StateOwner>> = OnceLock::new();
 
@@ -302,11 +302,17 @@ impl StateOwner {
         );
     }
 
-    pub fn ingest_sway_facts(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Ingest a backend-neutral `WmFacts` snapshot into `canvas_state`.
+    ///
+    /// Renamed from `ingest_sway_facts` in W1a (Phase 8). Callers fetch the
+    /// snapshot via the active `WmBackend`, then hand it here. The legacy
+    /// `ingest_sway_facts()` wrapper preserves the old shape for callers that
+    /// still snapshot internally.
+    pub fn ingest_facts(&mut self, facts: WmFacts) {
         let prior = self.canvas_state.state_revision;
         let previous_state = self.canvas_state.clone();
         let previous_zoom = self.canvas_state.zoom.clone();
-        let snapshot = sway_snapshot()?;
+        let snapshot = facts;
         let mut outcome = ConflictOutcome::None;
 
         let mut existing_cluster_positions = self
@@ -486,7 +492,6 @@ impl StateOwner {
 
         self.persist_after_mutation(&previous_state);
         self.bump_revision(prior, MutationType::SwayIngest, outcome);
-        Ok(())
     }
 
     pub fn mutate_get_state(&mut self) {
@@ -707,8 +712,8 @@ impl StateOwner {
         Ok(target)
     }
 
-    pub fn build_cluster_layout_inputs(&self) -> Vec<sway::backend::ClusterLayoutInput> {
-        let output_rect = sway::backend::Rect {
+    pub fn build_cluster_layout_inputs(&self) -> Vec<wm::layout::ClusterLayoutInput> {
+        let output_rect = wm::layout::Rect {
             x: 0,
             y: 0,
             width: self.canvas_state.output.width,
@@ -732,7 +737,7 @@ impl StateOwner {
                     .enumerate()
                     .map(|(idx, &wid)| (wid, idx as u64))
                     .collect();
-                sway::backend::ClusterLayoutInput {
+                wm::layout::ClusterLayoutInput {
                     cluster_id: cluster.id,
                     area: output_rect,
                     windows: cluster.windows.clone(),
@@ -743,15 +748,13 @@ impl StateOwner {
             .collect()
     }
 
-    pub fn current_window_geometry(
-        &self,
-    ) -> std::collections::HashMap<WindowId, sway::backend::Rect> {
+    pub fn current_window_geometry(&self) -> std::collections::HashMap<WindowId, wm::layout::Rect> {
         self.last_applied_geometry
             .iter()
             .map(|(&wid, &(w, h))| {
                 (
                     wid,
-                    sway::backend::Rect {
+                    wm::layout::Rect {
                         x: 0,
                         y: 0,
                         width: w,
@@ -764,7 +767,7 @@ impl StateOwner {
 
     pub fn update_applied_geometry(
         &mut self,
-        targets: &std::collections::HashMap<WindowId, sway::backend::Rect>,
+        targets: &std::collections::HashMap<WindowId, wm::layout::Rect>,
     ) {
         self.layout_engine_active = true;
         for (&wid, rect) in targets {
@@ -773,20 +776,20 @@ impl StateOwner {
         }
     }
 
-    pub fn layout_context(&self) -> sway::backend::LayoutComputeContext {
+    pub fn layout_context(&self) -> wm::layout::LayoutComputeContext {
         match &self.canvas_state.zoom {
-            ZoomLevel::Overview => sway::backend::LayoutComputeContext {
-                mode: sway::backend::LayoutMode::Overview,
+            ZoomLevel::Overview => wm::layout::LayoutComputeContext {
+                mode: wm::layout::LayoutMode::Overview,
                 focused_window_id: None,
                 focus_ratio: 0.75,
             },
-            ZoomLevel::Cluster(_) => sway::backend::LayoutComputeContext {
-                mode: sway::backend::LayoutMode::Cluster,
+            ZoomLevel::Cluster(_) => wm::layout::LayoutComputeContext {
+                mode: wm::layout::LayoutMode::Cluster,
                 focused_window_id: None,
                 focus_ratio: 0.75,
             },
-            ZoomLevel::Focus(wid) => sway::backend::LayoutComputeContext {
-                mode: sway::backend::LayoutMode::Focus,
+            ZoomLevel::Focus(wid) => wm::layout::LayoutComputeContext {
+                mode: wm::layout::LayoutMode::Focus,
                 focused_window_id: Some(*wid),
                 focus_ratio: 0.75,
             },
@@ -1243,88 +1246,6 @@ fn window_assignment_changed(previous: &CanvasState, next: &CanvasState) -> bool
     previous_assignments != next_assignments
 }
 
-struct SwaySnapshot {
-    clusters: Vec<Cluster>,
-    windows: Vec<Window>,
-    window_geometry: BTreeMap<WindowId, (i32, i32)>,
-    output: OutputState,
-    outputs: Vec<String>,
-    primary_output: Option<String>,
-}
-
-fn sway_snapshot() -> Result<SwaySnapshot, Box<dyn std::error::Error>> {
-    let mut connection = Connection::new()?;
-    let tree = connection.get_tree()?;
-    let workspaces = connection.get_workspaces()?;
-    let outputs = connection.get_outputs()?;
-
-    let mut clusters = Vec::new();
-    for workspace in workspaces
-        .into_iter()
-        .filter(|w| !w.name.starts_with("__i3"))
-    {
-        clusters.push(Cluster {
-            id: workspace.id as ClusterId,
-            name: workspace.name,
-            x: workspace.rect.x as f64,
-            y: workspace.rect.y as f64,
-            enabled: workspace.visible,
-            windows: Vec::new(),
-            last_focus: None,
-            recency: Vec::new(),
-        });
-    }
-
-    let mut windows = Vec::new();
-    let mut window_geometry = BTreeMap::new();
-    collect_windows_from_tree(&tree, None, false, &mut windows, &mut window_geometry);
-    windows.sort_by_key(|window| window.id);
-
-    let mut windows_by_cluster: BTreeMap<ClusterId, Vec<WindowId>> = BTreeMap::new();
-    for window in &windows {
-        if let Some(cluster_id) = window.cluster_id {
-            windows_by_cluster
-                .entry(cluster_id)
-                .or_default()
-                .push(window.id);
-        }
-    }
-
-    for cluster in &mut clusters {
-        cluster.windows = windows_by_cluster.remove(&cluster.id).unwrap_or_default();
-        cluster.recency = cluster.windows.clone();
-        cluster.last_focus = cluster.windows.first().copied();
-    }
-
-    let primary_output = outputs
-        .iter()
-        .find(|output| output.primary)
-        .map(|output| output.name.clone());
-    let connected_output_names = outputs
-        .iter()
-        .map(|output| output.name.clone())
-        .collect::<Vec<_>>();
-    let output = outputs
-        .iter()
-        .find(|output| output.focused)
-        .map(|output| OutputState {
-            name: output.name.clone(),
-            width: output.rect.width,
-            height: output.rect.height,
-            scale: output.scale.unwrap_or(1.0),
-        })
-        .unwrap_or_default();
-
-    Ok(SwaySnapshot {
-        clusters,
-        windows,
-        window_geometry,
-        output,
-        outputs: connected_output_names,
-        primary_output,
-    })
-}
-
 fn apply_zoom_to_viewport(
     viewport: &mut Viewport,
     factor: f64,
@@ -1343,126 +1264,25 @@ fn apply_zoom_to_viewport(
     viewport.scale = new_scale;
 }
 
-fn collect_windows_from_tree(
-    node: &swayipc::Node,
-    cluster: Option<ClusterId>,
-    in_scratchpad_workspace: bool,
-    out: &mut Vec<Window>,
-    geometry_out: &mut BTreeMap<WindowId, (i32, i32)>,
-) {
-    let under_scratch_ws = in_scratchpad_workspace
-        || (matches!(node.node_type, swayipc::NodeType::Workspace)
-            && node.name.as_deref().is_some_and(|n| n.starts_with("__i3")));
-    let cluster_id = if matches!(node.node_type, swayipc::NodeType::Workspace) {
-        if under_scratch_ws {
-            None
-        } else {
-            Some(node.id as ClusterId)
-        }
-    } else {
-        cluster
-    };
-
-    if matches!(
-        node.node_type,
-        swayipc::NodeType::Con | swayipc::NodeType::FloatingCon
-    ) && node.pid.is_some()
-    {
-        let title = node.name.clone().unwrap_or_default();
-        let app_id = node.app_id.clone();
-        let class = node
-            .window_properties
-            .as_ref()
-            .and_then(|props| props.class.clone());
-        let transient_for = node
-            .window_properties
-            .as_ref()
-            .and_then(|props| props.transient_for)
-            .map(|id| id as WindowId);
-        let app_id_lower = app_id.as_deref().map(str::to_ascii_lowercase);
-        let class_lower = class.as_deref().map(str::to_ascii_lowercase);
-        let title_lower = title.to_ascii_lowercase();
-        let has_overlay_hint = ["overlay", "popup"]
-            .iter()
-            .any(|hint| title_lower.contains(hint))
-            || app_id_lower
-                .as_deref()
-                .is_some_and(|value| value.contains("overlay") || value.contains("popup"))
-            || class_lower
-                .as_deref()
-                .is_some_and(|value| value.contains("overlay") || value.contains("popup"));
-
-        let is_scratchpad = under_scratch_ws
-            || matches!(
-                node.scratchpad_state,
-                Some(swayipc::ScratchpadState::Fresh) | Some(swayipc::ScratchpadState::Changed)
-            );
-
-        let role = if is_scratchpad {
-            WindowRole::Scratchpad
-        } else if has_overlay_hint {
-            WindowRole::Utility
-        } else if node.floating.is_some() || transient_for.is_some() {
-            WindowRole::Dialog
-        } else {
-            WindowRole::Normal
-        };
-
-        let effective_cluster_id = if is_scratchpad { None } else { cluster_id };
-
-        let window_id = node.id as WindowId;
-        geometry_out.insert(window_id, (node.rect.width, node.rect.height));
-        out.push(Window {
-            id: window_id,
-            title,
-            app_id,
-            class,
-            role,
-            state: if node.fullscreen_mode.unwrap_or(0) > 0 {
-                WindowState::Fullscreen
-            } else if is_scratchpad {
-                WindowState::MinimizedLike
-            } else if node.floating.is_some() {
-                WindowState::Floating
-            } else {
-                WindowState::Tiled
-            },
-            cluster_id: effective_cluster_id,
-            transient_for,
-            manual_cluster_override: false,
-            manual_position_override: is_scratchpad
-                || has_overlay_hint
-                || node.fullscreen_mode.unwrap_or(0) > 0,
-        });
-    }
-
-    for child in &node.nodes {
-        collect_windows_from_tree(child, cluster_id, under_scratch_ws, out, geometry_out);
-    }
-    for child in &node.floating_nodes {
-        collect_windows_from_tree(child, cluster_id, under_scratch_ws, out, geometry_out);
-    }
-}
-
 #[cfg(test)]
 #[path = "state_store_tests.rs"]
 mod tests;
 
-fn exclusion_reason(window: &Window) -> Option<sway::backend::LayoutExclusionReason> {
+fn exclusion_reason(window: &Window) -> Option<wm::layout::LayoutExclusionReason> {
     if window.role == WindowRole::Scratchpad {
-        return Some(sway::backend::LayoutExclusionReason::Scratchpad);
+        return Some(wm::layout::LayoutExclusionReason::Scratchpad);
     }
     if window.state == WindowState::Fullscreen {
-        return Some(sway::backend::LayoutExclusionReason::FullscreenTemporaryOverride);
+        return Some(wm::layout::LayoutExclusionReason::FullscreenTemporaryOverride);
     }
     if window.transient_for.is_some() || window.role == WindowRole::Dialog {
-        return Some(sway::backend::LayoutExclusionReason::TransientDialogAttached);
+        return Some(wm::layout::LayoutExclusionReason::TransientDialogAttached);
     }
     if window.role == WindowRole::Utility {
-        return Some(sway::backend::LayoutExclusionReason::OverlayOrPopup);
+        return Some(wm::layout::LayoutExclusionReason::OverlayOrPopup);
     }
     if window.manual_position_override {
-        return Some(sway::backend::LayoutExclusionReason::ManualResize);
+        return Some(wm::layout::LayoutExclusionReason::ManualResize);
     }
     None
 }

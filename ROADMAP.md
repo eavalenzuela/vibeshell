@@ -198,6 +198,9 @@ Features and code paths that exist but are not fully wired into the running syst
 
 **Decision (2026-04-29):** committed. Sway-as-backend is the dominant cause of perceived incompleteness — smooth transitions, real thumbnails, and gesture integration are blocked behind it. State model, layout engine, IPC protocol, and overlay UX carry over unchanged; compositor is a new backend, not a rewrite.
 
+**Sequencing (2026-04-29):** W1 broke down further — there was no `WmBackend` trait yet, so step one is defining it. W1a = trait + Sway impl behind it (no behavior change). W1b = minimal smithay compositor. W1c+ = parity (scene graph, gesture input, smooth zoom).
+
+- [x] **W1a — Define `WmBackend` trait + port Sway behind it** (2026-04-29): new `crates/wm` (trait, `WmFacts`, layout/frame engine moved over from `crates/sway/src/backend.rs`); `crates/sway` now hosts `SwayBackend impl wm::WmBackend` plus `sway_snapshot` + `collect_windows_from_tree` lifted out of `apps/vibeshellctl/src/state_store.rs`; daemon + state_store + ipc dispatcher route through `&mut dyn WmBackend`; `WM_BACKEND` env var (default `sway`, returns `NotImplemented` for `wlroots`). Panel/launcher/overlay deliberately not refactored — they're wayland clients, not control-plane callers, and will switch to vibeshell IPC when wlroots lands. All 23 unit tests + 26 smoke checks green. Single Sway-specific holdout: `ingest_sway_event_metadata` (dump-state debug probe, TODO(W1c)).
 - [ ] Stand up `WlrootsBackend` implementing the existing `WmBackend` trait (parallel to current `SwayBackend`, gated by env/config)
 - [ ] Scene-graph rendering pipeline (replaces Sway's tree → unlocks live thumbnails in Overview)
 - [ ] Smooth zoom transitions (Overview ↔ Cluster ↔ Focus) — was a v1 non-goal under Sway, in-scope here
