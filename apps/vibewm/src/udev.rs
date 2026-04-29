@@ -176,7 +176,7 @@ pub fn run_udev(
                 if let Some(udev) = state.udev.as_mut() {
                     for device in udev.devices.values_mut() {
                         if let Some(comp) = device.drm_compositor.as_mut() {
-                            comp.reset_state();
+                            let _ = comp.reset_state();
                         }
                     }
                 }
