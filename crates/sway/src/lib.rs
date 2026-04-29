@@ -104,10 +104,19 @@ pub fn spawn_event_stream() -> Receiver<SwaySignal> {
     let (event_tx, event_rx) = mpsc::channel();
 
     thread::spawn(move || {
+        // Under WM_BACKEND=wlroots there's no sway IPC to connect to; the
+        // failure is expected, not a misconfig. Demote those messages to
+        // debug so wlroots-mode logs stay clean.
+        let wlroots_mode = matches!(std::env::var("WM_BACKEND").as_deref(), Ok("wlroots"));
+
         let connection = match Connection::new() {
             Ok(connection) => connection,
             Err(error) => {
-                tracing::warn!(?error, "failed to connect event stream");
+                if wlroots_mode {
+                    tracing::debug!(?error, "sway event stream skipped (WM_BACKEND=wlroots)");
+                } else {
+                    tracing::warn!(?error, "failed to connect event stream");
+                }
                 return;
             }
         };
@@ -115,7 +124,11 @@ pub fn spawn_event_stream() -> Receiver<SwaySignal> {
         let mut events = match connection.subscribe([EventType::Workspace, EventType::Window]) {
             Ok(events) => events,
             Err(error) => {
-                tracing::warn!(?error, "failed to subscribe to sway events");
+                if wlroots_mode {
+                    tracing::debug!(?error, "sway subscribe skipped (WM_BACKEND=wlroots)");
+                } else {
+                    tracing::warn!(?error, "failed to subscribe to sway events");
+                }
                 return;
             }
         };

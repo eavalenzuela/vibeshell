@@ -283,6 +283,12 @@ pub enum IpcRequest {
     MoveFocusedWindowToCluster {
         cluster: ClusterId,
     },
+    /// Focus a specific window by id. Backend-neutral wrapper over
+    /// `WmBackend::focus_window` so launcher / panel / future callers can
+    /// activate a window without knowing whether sway or wlroots is active.
+    FocusWindow {
+        window: WindowId,
+    },
     RenameCluster {
         cluster: ClusterId,
         name: String,

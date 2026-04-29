@@ -965,8 +965,10 @@ fn activate_search_result(
                 title = title.as_str(),
                 "focusing window from launcher"
             );
-            Command::new("swaymsg")
-                .args([&format!("[con_id={window_id}] focus")])
+            // Goes through the daemon's WmBackend so it works under both
+            // sway and wlroots without dispatching swaymsg directly.
+            Command::new("vibeshellctl")
+                .args(["ipc", "focus-window", "--window", &window_id.to_string()])
                 .spawn()
                 .map_err(|error| error.to_string())?;
         }
@@ -979,7 +981,12 @@ fn activate_search_result(
                 "activating cluster from launcher"
             );
             Command::new("vibeshellctl")
-                .args(["ipc", "activate-cluster", &cluster_id.to_string()])
+                .args([
+                    "ipc",
+                    "activate-cluster",
+                    "--cluster",
+                    &cluster_id.to_string(),
+                ])
                 .spawn()
                 .map_err(|error| error.to_string())?;
         }

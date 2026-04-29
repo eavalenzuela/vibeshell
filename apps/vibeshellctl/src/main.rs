@@ -144,6 +144,11 @@ enum IpcCommands {
         #[arg(long)]
         cluster: ClusterId,
     },
+    /// Focus a specific window by id. Backend-neutral.
+    FocusWindow {
+        #[arg(long)]
+        window: WindowId,
+    },
     /// Rename a cluster.
     RenameCluster { cluster: ClusterId, name: String },
     /// Cycle through clusters in MRU order.
@@ -360,6 +365,7 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
         IpcCommands::MoveFocusedWindowToCluster { cluster } => {
             (IpcRequest::MoveFocusedWindowToCluster { cluster }, false)
         }
+        IpcCommands::FocusWindow { window } => (IpcRequest::FocusWindow { window }, false),
         IpcCommands::RenameCluster { cluster, name } => {
             (IpcRequest::RenameCluster { cluster, name }, false)
         }
@@ -744,6 +750,10 @@ pub(crate) fn dispatch_ipc_request(
                     message: "no window currently focused".into(),
                 }),
             }
+        }
+        IpcRequest::FocusWindow { window } => {
+            focus_window(window)?;
+            Ok(IpcResponse::Ack)
         }
         IpcRequest::RenameCluster { cluster, name } => {
             let result = with_state_owner(|owner| owner.rename_cluster(cluster, &name));
