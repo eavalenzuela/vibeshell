@@ -97,10 +97,36 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
+    // Sway event stream — usable under WM_BACKEND=sway. Silently no-ops if
+    // sway isn't running (e.g. WM_BACKEND=wlroots), in which case the
+    // vibewm-control subscribe thread below is the snappy-refresh source.
+    {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let events = sway::spawn_event_stream();
+            let normalized = sway::spawn_normalized_stream(events, EVENT_DEBOUNCE);
+            while normalized.recv().is_ok() {
+                if tx.send(()).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Vibewm-control event subscribe — usable under WM_BACKEND=wlroots. Reuses
+    // wm::WlrootsBackend::spawn_event_stream which already returns a
+    // Receiver<WmSignal>. Silently no-ops if vibewm isn't running.
     thread::spawn(move || {
-        let events = sway::spawn_event_stream();
-        let normalized = sway::spawn_normalized_stream(events, EVENT_DEBOUNCE);
-        while normalized.recv().is_ok() {
+        use wm::WmBackend;
+        let backend = match wm::WlrootsBackend::connect() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let stream = match backend.spawn_event_stream() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        while stream.recv().is_ok() {
             if tx.send(()).is_err() {
                 break;
             }

@@ -201,6 +201,10 @@ fn dispatch_request(
             let _ = stream.set_read_timeout(None);
             let _ = stream.set_write_timeout(None);
             state.event_subscribers.push(stream);
+            tracing::info!(
+                subscribers = state.event_subscribers.len(),
+                "vibewm-control: client subscribed to events"
+            );
             None
         }
     }

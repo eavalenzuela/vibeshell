@@ -1893,6 +1893,7 @@ dependencies = [
  "serde_json",
  "sway",
  "tracing",
+ "wm",
 ]
 
 [[package]]

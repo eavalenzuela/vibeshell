@@ -12,6 +12,7 @@ adw = { package = "libadwaita", version = "0.6" }
 gtk4-layer-shell = "0.3"
 serde_json = "1"
 sway = { path = "../../crates/sway" }
+wm = { path = "../../crates/wm" }
 
 [lints]
 workspace = true
