@@ -4,6 +4,7 @@
 //! seat/keyboard/pointer handles. One `Vibewm` lives in the calloop event loop
 //! for the duration of the compositor process.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::socket::ListeningSocketSource;
+use wm::layout::WindowId;
 
 use crate::model::VibewmModel;
 
@@ -55,6 +57,10 @@ pub struct Vibewm {
     /// `WmFacts`; vibewm itself uses it to route IPC commands to smithay
     /// handles.
     pub model: VibewmModel,
+
+    /// Last known logical position for each window, captured before unmapping
+    /// on cluster switch so we can re-map at the same spot on reactivation.
+    pub last_known_position: HashMap<WindowId, (i32, i32)>,
 }
 
 impl Vibewm {
@@ -95,6 +101,7 @@ impl Vibewm {
             seat,
             event_subscribers: Vec::new(),
             model: VibewmModel::new(),
+            last_known_position: HashMap::new(),
         }
     }
 

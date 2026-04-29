@@ -8,7 +8,7 @@
 //! doesn't model workspaces/window-ids yet (W1c-2). The seam is in place so
 //! `WM_BACKEND=wlroots` is dispatchable end-to-end.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -17,9 +17,10 @@ use common::contracts::{
 };
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
-use smithay::utils::SERIAL_COUNTER;
+use smithay::utils::{Size, SERIAL_COUNTER};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
+use wm::layout::LayoutOp;
 use wm::vibewm_ipc::{vibewm_socket_path, VibewmEvent, VibewmRequest, VibewmResponse};
 use wm::WmFacts;
 
@@ -111,18 +112,28 @@ fn dispatch_request(
         VibewmRequest::Ping => Some(VibewmResponse::Pong),
         VibewmRequest::Snapshot => Some(VibewmResponse::Snapshot(state.snapshot_facts())),
         VibewmRequest::ApplyLayoutOps { ops } => {
-            // W1c-2: model is in place but actual smithay move/resize is W1c-3.
-            tracing::info!(count = ops.len(), "vibewm-control: ApplyLayoutOps (stub)");
+            let applied = state.apply_layout_ops(&ops);
+            tracing::info!(
+                requested = ops.len(),
+                applied,
+                "vibewm-control: ApplyLayoutOps"
+            );
             Some(VibewmResponse::Ack)
         }
-        VibewmRequest::FocusWindow { window } => match state.set_keyboard_focus_to(window) {
-            true => Some(VibewmResponse::Ack),
-            false => Some(VibewmResponse::Error {
-                message: format!("window {window} not found"),
-            }),
-        },
+        VibewmRequest::FocusWindow { window } => {
+            if state.set_keyboard_focus_to(window) {
+                state.broadcast_workspace_or_window();
+                Some(VibewmResponse::Ack)
+            } else {
+                Some(VibewmResponse::Error {
+                    message: format!("window {window} not found"),
+                })
+            }
+        }
         VibewmRequest::ActivateCluster { cluster } => {
             if state.model.activate_cluster(cluster) {
+                state.sync_cluster_visibility();
+                state.broadcast_workspace_or_window();
                 Some(VibewmResponse::Ack)
             } else {
                 Some(VibewmResponse::Error {
@@ -137,7 +148,11 @@ fn dispatch_request(
                 .model
                 .find_cluster_by_name(&name)
                 .unwrap_or_else(|| state.model.create_cluster(name.clone()));
-            state.model.activate_cluster(id);
+            let switched = state.model.activate_cluster(id);
+            if switched {
+                state.sync_cluster_visibility();
+            }
+            state.broadcast_workspace_or_window();
             tracing::info!(
                 name,
                 cluster_id = id,
@@ -146,7 +161,10 @@ fn dispatch_request(
             Some(VibewmResponse::Ack)
         }
         VibewmRequest::BackAndForthWorkspace => {
-            state.model.back_and_forth();
+            if state.model.back_and_forth() {
+                state.sync_cluster_visibility();
+                state.broadcast_workspace_or_window();
+            }
             Some(VibewmResponse::Ack)
         }
         VibewmRequest::ExitSession => {
@@ -312,10 +330,72 @@ impl Vibewm {
         }
     }
 
+    /// Apply a batch of `LayoutOp`s by repositioning + resizing the
+    /// corresponding smithay windows. Returns the number of ops successfully
+    /// dispatched (skips ops whose window id isn't registered).
+    pub fn apply_layout_ops(&mut self, ops: &[LayoutOp]) -> usize {
+        let mut applied = 0;
+        for op in ops {
+            let Some(window) = self.model.windows.get(&op.window_id).cloned() else {
+                continue;
+            };
+            // Position via Space::map_element (idempotent re-map).
+            self.space
+                .map_element(window.clone(), (op.target.x, op.target.y), false);
+            self.last_known_position
+                .insert(op.window_id, (op.target.x, op.target.y));
+            // Size via xdg_toplevel configure — client redraws at new size on
+            // its next commit.
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|s| {
+                    s.size = Some(Size::from((op.target.width, op.target.height)));
+                });
+                toplevel.send_pending_configure();
+            }
+            applied += 1;
+        }
+        applied
+    }
+
+    /// After a cluster activation, walk the model and ensure exactly the
+    /// active cluster's windows are mapped in the smithay `Space`. Inactive
+    /// cluster windows get unmapped (kept alive in the registry, but
+    /// invisible). Their last position is cached so reactivation restores
+    /// them in place.
+    pub fn sync_cluster_visibility(&mut self) {
+        let active = self.model.active_cluster;
+        let active_ids: BTreeSet<WindowId> = self
+            .model
+            .clusters
+            .iter()
+            .find(|c| c.id == active)
+            .map(|c| c.windows.iter().copied().collect())
+            .unwrap_or_default();
+
+        let entries: Vec<(WindowId, smithay::desktop::Window)> = self
+            .model
+            .windows
+            .iter()
+            .map(|(id, w)| (*id, w.clone()))
+            .collect();
+
+        for (id, window) in entries {
+            if active_ids.contains(&id) {
+                let pos = self.last_known_position.get(&id).copied().unwrap_or((0, 0));
+                self.space.map_element(window, pos, false);
+            } else {
+                if let Some(loc) = self.space.element_location(&window) {
+                    self.last_known_position.insert(id, (loc.x, loc.y));
+                }
+                self.space.unmap_elem(&window);
+            }
+        }
+    }
+
     /// Push a `WorkspaceOrWindow` event to all subscribed clients. Drops
-    /// disconnected subscribers. Called from W1c-3 onwards when smithay
-    /// events drive workspace/window changes.
-    #[allow(dead_code)]
+    /// disconnected subscribers. Called whenever the model changes
+    /// meaningfully — new toplevel, focus change, cluster activation,
+    /// toplevel destroyed.
     pub fn broadcast_workspace_or_window(&mut self) {
         let event = VibewmResponse::Event(VibewmEvent::WorkspaceOrWindow);
         let line = match serde_json::to_string(&event) {

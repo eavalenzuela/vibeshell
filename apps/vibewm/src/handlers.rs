@@ -115,6 +115,7 @@ impl SeatHandler for Vibewm {
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client);
+        self.broadcast_workspace_or_window();
     }
 }
 
@@ -156,6 +157,8 @@ impl XdgShellHandler for Vibewm {
         let id = self.model.register_window(window.clone());
         tracing::info!(window_id = id, "vibewm: new toplevel");
         self.space.map_element(window, (0, 0), false);
+        self.last_known_position.insert(id, (0, 0));
+        self.broadcast_workspace_or_window();
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
@@ -192,6 +195,16 @@ impl XdgShellHandler for Vibewm {
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
         // TODO(W1c): popup grabs.
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let target = surface.wl_surface();
+        if let Some(id) = self.model.window_id_for_surface(target) {
+            tracing::info!(window_id = id, "vibewm: toplevel destroyed");
+            self.last_known_position.remove(&id);
+            self.model.unregister_window(id);
+            self.broadcast_workspace_or_window();
+        }
     }
 }
 
