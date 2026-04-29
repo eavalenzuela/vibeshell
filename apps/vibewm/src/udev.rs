@@ -426,13 +426,17 @@ fn egl_from_gbm(
 /// completion notice. Calling it here would double-ack and confuse the
 /// compositor's internal state.
 fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
+    tracing::debug!(?drm_node, "udev: render_node entry");
     let Some(udev) = state.udev.as_mut() else {
+        tracing::debug!("udev: render_node: udev state missing");
         return;
     };
     let Some(device) = udev.devices.get_mut(&drm_node) else {
+        tracing::debug!("udev: render_node: device entry missing");
         return;
     };
     let Some(comp) = device.drm_compositor.as_mut() else {
+        tracing::debug!("udev: render_node: drm_compositor missing");
         return;
     };
 
@@ -462,13 +466,10 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
     use smithay::backend::drm::compositor::FrameError;
     match queue_outcome {
         Ok(()) => {
-            // Frame queued. Next VBlank will tick frame_submitted +
-            // re-render via the DrmEvent::VBlank handler.
+            tracing::debug!("udev: queue_frame ok — waiting for VBlank");
         }
         Err(FrameError::EmptyFrame) => {
-            // Documented benign signal: nothing to commit. Schedule a
-            // retry roughly one retrace period out so we'll re-check
-            // when a client commits damage.
+            tracing::debug!("udev: queue_frame EmptyFrame — scheduling retry");
             schedule_retry_frame(state, drm_node);
         }
         Err(e) => {
@@ -497,9 +498,13 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
 /// stop driving the loop entirely (no buffer in flight = no VBlank).
 fn schedule_retry_frame(state: &Vibewm, drm_node: DrmNode) {
     let timer = Timer::from_duration(Duration::from_millis(16));
-    let _ = state.loop_handle.insert_source(timer, move |_, _, state| {
+    match state.loop_handle.insert_source(timer, move |_, _, state| {
+        tracing::debug!("udev: retry timer fired");
         render_node(state, drm_node);
         TimeoutAction::Drop
-    });
+    }) {
+        Ok(_) => tracing::debug!("udev: retry timer scheduled"),
+        Err(e) => warn!(?e, "udev: failed to schedule retry timer"),
+    }
 }
 
