@@ -1917,6 +1917,7 @@ dependencies = [
  "libadwaita",
  "serde_json",
  "tracing",
+ "wm",
  "zbus",
 ]
 

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 config = { path = "../../crates/config" }
 common = { path = "../../crates/common" }
+wm = { path = "../../crates/wm" }
 tracing.workspace = true
 gtk4 = "0.8"
 adw = { package = "libadwaita", version = "0.6" }

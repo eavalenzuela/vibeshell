@@ -12,7 +12,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
@@ -25,9 +25,39 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Spawn a thread that polls the daemon every `poll_interval` and pushes
-/// `PanelUpdate` snapshots onto `tx`. The thread reconnects with exponential
-/// backoff on socket errors.
+/// `PanelUpdate` snapshots onto `tx`. Also spawns a parallel thread that
+/// subscribes to vibewm's event stream (under WM_BACKEND=wlroots) and signals
+/// the poll thread to do an immediate fetch on each `WorkspaceOrWindow` event,
+/// so cluster switches and new windows propagate within event RTT instead of
+/// waiting for the next poll tick. The poll thread reconnects with
+/// exponential backoff on socket errors.
 pub fn spawn_daemon_listener(tx: Sender<PanelUpdate>, poll_interval: Duration) {
+    let (wakeup_tx, wakeup_rx) = mpsc::channel::<()>();
+
+    // Event-subscribe thread: pulses `wakeup_tx` whenever vibewm reports a
+    // workspace/window change. Silently no-ops if vibewm isn't running (sway
+    // mode), in which case the poll thread's tick is the sole driver.
+    {
+        let wakeup_tx = wakeup_tx.clone();
+        thread::spawn(move || {
+            use wm::WmBackend;
+            let backend = match wm::WlrootsBackend::connect() {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            let stream = match backend.spawn_event_stream() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            while stream.recv().is_ok() {
+                if wakeup_tx.send(()).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Poll thread: fetch on each tick OR each wakeup, whichever fires first.
     thread::spawn(move || {
         let mut backoff = CONNECT_BACKOFF_INITIAL;
         let mut last_state: Option<PanelState> = None;
@@ -41,7 +71,12 @@ pub fn spawn_daemon_listener(tx: Sender<PanelUpdate>, poll_interval: Duration) {
                         }
                         last_state = Some(state);
                     }
-                    thread::sleep(poll_interval);
+                    // Sleep up to `poll_interval`, but wake immediately on
+                    // any pulse from the event-subscribe thread.
+                    match wakeup_rx.recv_timeout(poll_interval) {
+                        Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
