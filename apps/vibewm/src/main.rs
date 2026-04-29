@@ -11,6 +11,7 @@ use smithay::reexports::wayland_server::Display;
 mod handlers;
 mod input;
 mod ipc;
+mod model;
 mod state;
 mod winit;
 

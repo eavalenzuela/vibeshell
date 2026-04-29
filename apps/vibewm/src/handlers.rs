@@ -153,6 +153,8 @@ impl XdgShellHandler for Vibewm {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface);
+        let id = self.model.register_window(window.clone());
+        tracing::info!(window_id = id, "vibewm: new toplevel");
         self.space.map_element(window, (0, 0), false);
     }
 

@@ -24,6 +24,8 @@ use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::socket::ListeningSocketSource;
 
+use crate::model::VibewmModel;
+
 pub struct Vibewm {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -48,6 +50,11 @@ pub struct Vibewm {
     /// stream blocks-on-read on the client side and gets pushed JSON-line
     /// `VibewmResponse::Event(...)` messages when state changes.
     pub event_subscribers: Vec<UnixStream>,
+
+    /// Workspace + window-id registry. The daemon snapshots this to build a
+    /// `WmFacts`; vibewm itself uses it to route IPC commands to smithay
+    /// handles.
+    pub model: VibewmModel,
 }
 
 impl Vibewm {
@@ -87,6 +94,7 @@ impl Vibewm {
             data_device_state,
             seat,
             event_subscribers: Vec::new(),
+            model: VibewmModel::new(),
         }
     }
 

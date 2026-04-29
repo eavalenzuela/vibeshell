@@ -8,11 +8,18 @@
 //! doesn't model workspaces/window-ids yet (W1c-2). The seam is in place so
 //! `WM_BACKEND=wlroots` is dispatchable end-to-end.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
+use common::contracts::{
+    Cluster, OutputState, Window as DomainWindow, WindowId, WindowRole, WindowState,
+};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
+use smithay::utils::SERIAL_COUNTER;
+use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use wm::vibewm_ipc::{vibewm_socket_path, VibewmEvent, VibewmRequest, VibewmResponse};
 use wm::WmFacts;
 
@@ -104,24 +111,42 @@ fn dispatch_request(
         VibewmRequest::Ping => Some(VibewmResponse::Pong),
         VibewmRequest::Snapshot => Some(VibewmResponse::Snapshot(state.snapshot_facts())),
         VibewmRequest::ApplyLayoutOps { ops } => {
-            // W1c-1 stub: log, no actual move/resize yet (W1c-3).
+            // W1c-2: model is in place but actual smithay move/resize is W1c-3.
             tracing::info!(count = ops.len(), "vibewm-control: ApplyLayoutOps (stub)");
             Some(VibewmResponse::Ack)
         }
-        VibewmRequest::FocusWindow { window } => {
-            tracing::info!(window, "vibewm-control: FocusWindow (stub)");
-            Some(VibewmResponse::Ack)
-        }
+        VibewmRequest::FocusWindow { window } => match state.set_keyboard_focus_to(window) {
+            true => Some(VibewmResponse::Ack),
+            false => Some(VibewmResponse::Error {
+                message: format!("window {window} not found"),
+            }),
+        },
         VibewmRequest::ActivateCluster { cluster } => {
-            tracing::info!(cluster, "vibewm-control: ActivateCluster (stub)");
-            Some(VibewmResponse::Ack)
+            if state.model.activate_cluster(cluster) {
+                Some(VibewmResponse::Ack)
+            } else {
+                Some(VibewmResponse::Error {
+                    message: format!("cluster {cluster} not found"),
+                })
+            }
         }
         VibewmRequest::CreateNamedWorkspace { name } => {
-            tracing::info!(name, "vibewm-control: CreateNamedWorkspace (stub)");
+            // Sway-compat: `workspace "play"` switches to the workspace,
+            // creating it if it didn't exist. Mirror that here.
+            let id = state
+                .model
+                .find_cluster_by_name(&name)
+                .unwrap_or_else(|| state.model.create_cluster(name.clone()));
+            state.model.activate_cluster(id);
+            tracing::info!(
+                name,
+                cluster_id = id,
+                "vibewm-control: CreateNamedWorkspace"
+            );
             Some(VibewmResponse::Ack)
         }
         VibewmRequest::BackAndForthWorkspace => {
-            tracing::info!("vibewm-control: BackAndForthWorkspace (stub)");
+            state.model.back_and_forth();
             Some(VibewmResponse::Ack)
         }
         VibewmRequest::ExitSession => {
@@ -133,10 +158,9 @@ fn dispatch_request(
             tracing::info!("vibewm-control: ReloadWmConfig (stub)");
             Some(VibewmResponse::Ack)
         }
-        VibewmRequest::FocusedWindow => {
-            // W1c-1 stub: no window-id model yet.
-            Some(VibewmResponse::FocusedWindow { window: None })
-        }
+        VibewmRequest::FocusedWindow => Some(VibewmResponse::FocusedWindow {
+            window: state.focused_window_id(),
+        }),
         VibewmRequest::Subscribe => {
             // Send the initial Subscribed reply on `stream`, then hand the
             // (cloned) stream to the subscribers list. Returning None tells
@@ -165,17 +189,126 @@ fn dispatch_request(
 }
 
 impl Vibewm {
-    /// Build a `WmFacts` snapshot from current compositor state. W1c-1 stub:
-    /// returns mostly empty data. W1c-2 will fill in clusters/windows/output
-    /// as vibewm grows a real workspace + window-id model.
-    pub fn snapshot_facts(&self) -> WmFacts {
+    /// Build a `WmFacts` snapshot of vibewm's current state.
+    ///
+    /// Walks the model registry, pulls live title/app_id off each toplevel,
+    /// merges geometry from the smithay `Space`, and reports the winit
+    /// output. `prune_dead` runs first so closed-but-not-yet-cleaned-up
+    /// surfaces don't leak into snapshots.
+    pub fn snapshot_facts(&mut self) -> WmFacts {
+        self.model.prune_dead();
+
+        let clusters: Vec<Cluster> = self
+            .model
+            .clusters
+            .iter()
+            .map(|c| Cluster {
+                id: c.id,
+                name: c.name.clone(),
+                // Spatial overview-canvas coords don't exist in vibewm yet
+                // (W1c-3+). Daemon's persisted state owns them.
+                x: 0.0,
+                y: 0.0,
+                enabled: c.id == self.model.active_cluster,
+                windows: c.windows.clone(),
+                last_focus: c.windows.last().copied(),
+                recency: c.windows.clone(),
+            })
+            .collect();
+
+        let mut windows = Vec::with_capacity(self.model.windows.len());
+        let mut window_geometry: BTreeMap<WindowId, (i32, i32)> = BTreeMap::new();
+        for (&id, win) in &self.model.windows {
+            let toplevel = match win.toplevel() {
+                Some(t) => t,
+                None => continue,
+            };
+            let surface = toplevel.wl_surface();
+            let (title, app_id) = with_states(surface, |states| {
+                let data = states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .map(|d| d.lock().expect("XdgToplevelSurfaceData mutex poisoned"));
+                match data {
+                    Some(d) => (d.title.clone().unwrap_or_default(), d.app_id.clone()),
+                    None => (String::new(), None),
+                }
+            });
+            let cluster_id = self
+                .model
+                .clusters
+                .iter()
+                .find(|c| c.windows.contains(&id))
+                .map(|c| c.id);
+            if let Some(geo) = self.space.element_geometry(win) {
+                window_geometry.insert(id, (geo.size.w, geo.size.h));
+            }
+            windows.push(DomainWindow {
+                id,
+                title,
+                app_id,
+                class: None,
+                role: WindowRole::Normal,
+                state: WindowState::Tiled,
+                cluster_id,
+                transient_for: None,
+                manual_cluster_override: false,
+                manual_position_override: false,
+            });
+        }
+
+        let (output_state, output_names, primary_output) = self
+            .space
+            .outputs()
+            .next()
+            .cloned()
+            .map(|output| {
+                let mode = output.current_mode();
+                let scale = output.current_scale().fractional_scale();
+                let state = OutputState {
+                    name: output.name(),
+                    width: mode.map(|m| m.size.w).unwrap_or(0),
+                    height: mode.map(|m| m.size.h).unwrap_or(0),
+                    scale,
+                };
+                let names = self.space.outputs().map(|o| o.name()).collect();
+                (state, names, Some(output.name()))
+            })
+            .unwrap_or_else(|| (OutputState::default(), Vec::new(), None));
+
         WmFacts {
-            clusters: Vec::new(),
-            windows: Vec::new(),
-            window_geometry: Default::default(),
-            output: Default::default(),
-            outputs: self.space.outputs().map(|o| o.name()).collect(),
-            primary_output: None,
+            clusters,
+            windows,
+            window_geometry,
+            output: output_state,
+            outputs: output_names,
+            primary_output,
+        }
+    }
+
+    /// Map the seat's current keyboard focus to a `WindowId` via the model.
+    pub fn focused_window_id(&self) -> Option<WindowId> {
+        let keyboard = self.seat.get_keyboard()?;
+        let surface = keyboard.current_focus()?;
+        self.model.window_id_for_surface(&surface)
+    }
+
+    /// Tell the seat to focus the toplevel registered under `window`.
+    /// Returns false if the window id is unknown or has no toplevel.
+    pub fn set_keyboard_focus_to(&mut self, window: WindowId) -> bool {
+        let Some(win) = self.model.windows.get(&window).cloned() else {
+            return false;
+        };
+        let Some(toplevel) = win.toplevel() else {
+            return false;
+        };
+        let target = toplevel.wl_surface().clone();
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            let serial = SERIAL_COUNTER.next_serial();
+            keyboard.set_focus(self, Some(target), serial);
+            true
+        } else {
+            false
         }
     }
 
