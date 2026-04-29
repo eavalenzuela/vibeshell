@@ -161,6 +161,7 @@ pub enum WindowRole {
     Normal,
     Dialog,
     Utility,
+    Scratchpad,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

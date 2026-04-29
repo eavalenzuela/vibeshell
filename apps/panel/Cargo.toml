@@ -13,6 +13,7 @@ gtk4 = "0.8"
 adw = { package = "libadwaita", version = "0.6" }
 gtk4-layer-shell = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+zbus = "4"
 
 [lints]
 workspace = true

@@ -133,7 +133,18 @@ fn build_mutation_command(mutation: &IpcMutation) -> Command {
 
 pub fn try_dispatch_via_socket(request: &IpcRequest) -> Option<IpcResponse> {
     let socket_path = daemon_socket_path();
-    let stream = UnixStream::connect(&socket_path).ok()?;
+    // First attempt; on connect failure, sleep briefly and try once more so
+    // that user actions firing during a daemon restart aren't silently lost.
+    // The retry only kicks in on connect errors (ECONNREFUSED / ENOENT) —
+    // post-connect read/write failures aren't retried (writes may have side
+    // effects, so a blind retry could double-apply a mutation).
+    let stream = match UnixStream::connect(&socket_path) {
+        Ok(s) => s,
+        Err(_) => {
+            std::thread::sleep(Duration::from_millis(100));
+            UnixStream::connect(&socket_path).ok()?
+        }
+    };
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))

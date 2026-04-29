@@ -169,6 +169,7 @@ pub enum LayoutExclusionReason {
     TransientDialogAttached,
     OverlayOrPopup,
     ManualResize,
+    Scratchpad,
 }
 
 impl LayoutExclusionReason {
@@ -178,6 +179,7 @@ impl LayoutExclusionReason {
             Self::TransientDialogAttached => "transient_dialog_attached_to_parent",
             Self::OverlayOrPopup => "overlay_or_popup",
             Self::ManualResize => "manual_resize",
+            Self::Scratchpad => "scratchpad",
         }
     }
 }

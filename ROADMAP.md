@@ -16,7 +16,7 @@
 ### Must-have desktop-reality features
 - [x] Multi-monitor: per-output viewport (even with one global canvas) *(Phase 6.5)*
 - [x] Basic rules: float dialogs, keep transient windows attached to parent — `anchor_transient_dialogs()` + `WindowRole::Dialog`
-- [x] Handle special windows: fullscreen, scratchpad, modals, popups — fullscreen/floating/dialog/popup detection; scratchpad TBD
+- [x] Handle special windows: fullscreen, scratchpad, modals, popups — `WindowRole::Scratchpad` + `LayoutExclusionReason::Scratchpad`; ingest detects via `scratchpad_state` and `__i3*` workspace name; cluster_id forced to None; auto-cluster + transient anchor skip scratchpad; layout engine excludes
 - [x] Non-jank repositioning: debounce geometry updates, respect manual resize overrides *(Phase 6.5)*
 
 ### Explicit non-goals (keep v1 shippable)
@@ -135,8 +135,8 @@
 - [x] Non-blocking IPC dispatch for `UpdateClusterDrag` and `KeyboardMoveBy` (`dispatch_ipc_mutation_detached`)
 - [x] Full drag lifecycle: `BeginClusterDrag` / `UpdateClusterDrag` / `CommitClusterDrag` / `CancelClusterDrag` wired CLI → IPC → state
 - [x] Drag offset baked into `canvas_state` on commit to prevent double-offset on next daemon poll
-- [ ] Viewport pan/zoom writes ≤20 Hz *(deferred — lower priority given pan/zoom are user-initiated, not sustained)*
-- [ ] Simple overlay animations *(deferred — explicit non-goal for v1)*
+- [x] Viewport pan/zoom writes ≤20 Hz — **superseded** (2026-04-29). Audit found drag-pan already fires only on `drag_end` (one IPC per gesture); inertia/viewport-anim only fire at loop end; keyboard pan is event-driven by user input. The only sustained path is scroll-wheel zoom, but `OverviewZoom` takes a sign-only `delta` with fixed `STEP=1.12` — throttling drops zoom steps rather than coalescing them, requiring an absolute-scale protocol change to fix correctly. Phase 8 (wlroots) replaces the input dispatch entirely, making this throwaway work.
+- [x] Simple overlay animations — cluster-dive ease-in: 220 ms ease-out-cubic pan + zoom (gain 1.4×) before `on_dive`/`on_activate` flips zoom level. Generalized `ViewportAnim` to interpolate scale and run an `on_complete` callback; `start_recenter_anim` now delegates through a shared `start_viewport_anim`. Overview ↔ Cluster ↔ Focus mode-change animations deferred to Phase 8 (those require the overlay to render non-Overview modes, which is a wlroots-era responsibility).
 
 **Exit criteria:** no "constant resizing" feeling; CPU stays sane. ✓
 
@@ -194,9 +194,29 @@ Features and code paths that exist but are not fully wired into the running syst
 
 ---
 
-### [ ] Phase 8 — Compositor decision
+### [ ] Phase 8 — wlroots compositor port
 
-- [ ] Evaluate whether wlroots compositor is needed
-- [ ] Trigger conditions: smooth transitions, true scene-graph thumbnails, deep gesture integration
-- [ ] If proceeding: port to `WlrootsBackend` implementing the existing `WmBackend` trait
-- [ ] State model, layout engine, IPC protocol, and UX carry over — compositor is a new backend, not a rewrite
+**Decision (2026-04-29):** committed. Sway-as-backend is the dominant cause of perceived incompleteness — smooth transitions, real thumbnails, and gesture integration are blocked behind it. State model, layout engine, IPC protocol, and overlay UX carry over unchanged; compositor is a new backend, not a rewrite.
+
+- [ ] Stand up `WlrootsBackend` implementing the existing `WmBackend` trait (parallel to current `SwayBackend`, gated by env/config)
+- [ ] Scene-graph rendering pipeline (replaces Sway's tree → unlocks live thumbnails in Overview)
+- [ ] Smooth zoom transitions (Overview ↔ Cluster ↔ Focus) — was a v1 non-goal under Sway, in-scope here
+- [ ] Gesture integration via `libinput` events (pinch-to-zoom Overview, swipe between clusters)
+- [ ] Session script: `WM_BACKEND=wlroots|sway` switch in `scripts/start-sway-session` (rename to `start-vibeshell-session`)
+- [ ] Layer-shell, xdg-shell, xdg-decoration, xwayland protocols
+- [ ] Migration path: smoke-test passes against `WlrootsBackend`; both backends stay green until parity reached
+- [ ] Retire Sway backend once parity + soak window pass (separate cleanup PR)
+
+**Exit criteria:** vibeshell runs as its own compositor; smooth Overview↔Cluster zoom; live thumbnails visible in Overview; pinch/swipe gestures functional; existing IPC + state persistence unchanged.
+
+---
+
+### [ ] Phase 9 — Robustness & system integration
+
+**Scope decision (2026-04-29):** GTK stack upgrade explicitly **deferred** (already audited as not-exploitable; pure dep hygiene, not blocking).
+
+- [x] **DBus migration for panel network status** (2026-04-29): `nmcli` subprocess polling replaced with `zbus::blocking` reads of `org.freedesktop.NetworkManager` (`Connectivity` u32 + `PrimaryConnection` object path → `Connection.Active.Type`). Connection cached on `NetworkProvider`, reset on read failure for self-healing. ~50–100× lower per-poll CPU than fork+nmcli. Audio (`wpctl`) **descoped** — PipeWire has no clean DBus surface; revisit when Phase 8 needs PipeWire for media-key handling.
+- [x] **Daemon resilience — IPC connect retry** (2026-04-29): single 100 ms-delayed retry inside both `try_dispatch_via_socket` (overlay) and the vibeshellctl IPC client when the initial `UnixStream::connect` fails, so user actions firing during a daemon restart aren't silently dropped. Read/write errors are not retried (mutations may have side effects).
+- [x] **Typed partial-failure `IpcResponse` errors** — descoped 2026-04-29. Roadmap framing assumed batched mutations (with partial-success states); the protocol has none — every IPC is a single mutation with a single response. Renaming `String` → enum-wrapping-`String` without that use case is ceremony. Revisit if/when batched mutations are introduced.
+
+**Exit criteria (revised):** panel network status now reads via DBus (no `nmcli` fork); a brief daemon restart no longer drops in-flight user actions on a single socket retry. Audio DBus and event-driven push deferred per descopes above.

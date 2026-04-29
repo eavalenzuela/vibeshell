@@ -374,7 +374,17 @@ fn dispatch_via_daemon_or_direct(
 
     let socket_path = common::contracts::daemon_socket_path();
     if socket_path.exists() {
-        match UnixStream::connect(&socket_path) {
+        // Single retry with a brief delay: covers the window where the daemon
+        // is restarting (socket file recreated). Read/write errors are not
+        // retried since the mutation may have already been applied.
+        let stream_result = match UnixStream::connect(&socket_path) {
+            Ok(s) => Ok(s),
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                UnixStream::connect(&socket_path)
+            }
+        };
+        match stream_result {
             Ok(stream) => {
                 stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
                 stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;

@@ -1156,6 +1156,7 @@ impl StateOwner {
             if window.cluster_id.is_some()
                 || window.manual_cluster_override
                 || window.transient_for.is_some()
+                || window.role == WindowRole::Scratchpad
             {
                 continue;
             }
@@ -1181,7 +1182,7 @@ impl StateOwner {
             .filter_map(|w| w.cluster_id.map(|c| (w.id, c)))
             .collect();
         for window in &mut self.canvas_state.windows {
-            if window.manual_cluster_override {
+            if window.manual_cluster_override || window.role == WindowRole::Scratchpad {
                 continue;
             }
             let Some(parent_id) = window.transient_for else {
@@ -1276,7 +1277,7 @@ fn sway_snapshot() -> Result<SwaySnapshot, Box<dyn std::error::Error>> {
 
     let mut windows = Vec::new();
     let mut window_geometry = BTreeMap::new();
-    collect_windows_from_tree(&tree, None, &mut windows, &mut window_geometry);
+    collect_windows_from_tree(&tree, None, false, &mut windows, &mut window_geometry);
     windows.sort_by_key(|window| window.id);
 
     let mut windows_by_cluster: BTreeMap<ClusterId, Vec<WindowId>> = BTreeMap::new();
@@ -1345,11 +1346,19 @@ fn apply_zoom_to_viewport(
 fn collect_windows_from_tree(
     node: &swayipc::Node,
     cluster: Option<ClusterId>,
+    in_scratchpad_workspace: bool,
     out: &mut Vec<Window>,
     geometry_out: &mut BTreeMap<WindowId, (i32, i32)>,
 ) {
+    let under_scratch_ws = in_scratchpad_workspace
+        || (matches!(node.node_type, swayipc::NodeType::Workspace)
+            && node.name.as_deref().is_some_and(|n| n.starts_with("__i3")));
     let cluster_id = if matches!(node.node_type, swayipc::NodeType::Workspace) {
-        Some(node.id as ClusterId)
+        if under_scratch_ws {
+            None
+        } else {
+            Some(node.id as ClusterId)
+        }
     } else {
         cluster
     };
@@ -1383,13 +1392,23 @@ fn collect_windows_from_tree(
                 .as_deref()
                 .is_some_and(|value| value.contains("overlay") || value.contains("popup"));
 
-        let role = if has_overlay_hint {
+        let is_scratchpad = under_scratch_ws
+            || matches!(
+                node.scratchpad_state,
+                Some(swayipc::ScratchpadState::Fresh) | Some(swayipc::ScratchpadState::Changed)
+            );
+
+        let role = if is_scratchpad {
+            WindowRole::Scratchpad
+        } else if has_overlay_hint {
             WindowRole::Utility
         } else if node.floating.is_some() || transient_for.is_some() {
             WindowRole::Dialog
         } else {
             WindowRole::Normal
         };
+
+        let effective_cluster_id = if is_scratchpad { None } else { cluster_id };
 
         let window_id = node.id as WindowId;
         geometry_out.insert(window_id, (node.rect.width, node.rect.height));
@@ -1401,27 +1420,38 @@ fn collect_windows_from_tree(
             role,
             state: if node.fullscreen_mode.unwrap_or(0) > 0 {
                 WindowState::Fullscreen
+            } else if is_scratchpad {
+                WindowState::MinimizedLike
             } else if node.floating.is_some() {
                 WindowState::Floating
             } else {
                 WindowState::Tiled
             },
-            cluster_id,
+            cluster_id: effective_cluster_id,
             transient_for,
             manual_cluster_override: false,
-            manual_position_override: has_overlay_hint || node.fullscreen_mode.unwrap_or(0) > 0,
+            manual_position_override: is_scratchpad
+                || has_overlay_hint
+                || node.fullscreen_mode.unwrap_or(0) > 0,
         });
     }
 
     for child in &node.nodes {
-        collect_windows_from_tree(child, cluster_id, out, geometry_out);
+        collect_windows_from_tree(child, cluster_id, under_scratch_ws, out, geometry_out);
     }
     for child in &node.floating_nodes {
-        collect_windows_from_tree(child, cluster_id, out, geometry_out);
+        collect_windows_from_tree(child, cluster_id, under_scratch_ws, out, geometry_out);
     }
 }
 
+#[cfg(test)]
+#[path = "state_store_tests.rs"]
+mod tests;
+
 fn exclusion_reason(window: &Window) -> Option<sway::backend::LayoutExclusionReason> {
+    if window.role == WindowRole::Scratchpad {
+        return Some(sway::backend::LayoutExclusionReason::Scratchpad);
+    }
     if window.state == WindowState::Fullscreen {
         return Some(sway::backend::LayoutExclusionReason::FullscreenTemporaryOverride);
     }

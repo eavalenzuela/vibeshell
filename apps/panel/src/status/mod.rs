@@ -32,7 +32,7 @@ impl StatusCollector {
     pub fn new() -> Self {
         Self {
             audio: AudioProvider,
-            network: NetworkProvider,
+            network: NetworkProvider::new(),
             battery: BatteryProvider,
         }
     }

@@ -31,6 +31,8 @@ const SNAP_THRESHOLD_SCREEN: f64 = 24.0;
 const INERTIA_FRICTION: f64 = 0.86;
 const INERTIA_MIN_PX: f64 = 0.5;
 const RECENTER_DURATION_MS: f64 = 220.0;
+const DIVE_DURATION_MS: f64 = 220.0;
+const DIVE_ZOOM_GAIN: f64 = 1.4;
 
 #[derive(Clone)]
 pub struct OverviewCanvas {
@@ -68,16 +70,21 @@ struct SnapGuide {
     coord: f64,
 }
 
-/// Smooth viewport animation (used for R-key recenter).
+/// Smooth viewport animation (used for R-key recenter and cluster dive).
 struct ViewportAnim {
     start_x: f64,
     start_y: f64,
     target_x: f64,
     target_y: f64,
+    start_scale: f64,
+    target_scale: f64,
     start: Instant,
     duration_ms: f64,
     /// Generation counter so a new animation cancels any previous timeout callback.
     generation: u64,
+    /// Fires once when the animation reaches t=1.0. `take()`n out before invoking
+    /// so re-entrant cancels (e.g. user mashes Enter twice) don't double-fire.
+    on_complete: Option<Box<dyn FnOnce()>>,
 }
 
 struct WidgetState {
@@ -177,7 +184,8 @@ impl OverviewCanvas {
                         .interaction
                         .on_event(InteractionEvent::DoubleClickCluster);
                     if let Some(cluster_id) = state.selected_cluster {
-                        on_dive(cluster_id);
+                        drop(state);
+                        start_dive_anim(&area, Rc::clone(&data), cluster_id, Rc::clone(&on_dive));
                     }
                     return;
                 }
@@ -685,7 +693,13 @@ impl OverviewCanvas {
                     gdk::Key::Return => {
                         state.interaction.on_event(InteractionEvent::Enter);
                         if let Some(cluster_id) = state.selected_cluster {
-                            on_activate(cluster_id);
+                            drop(state);
+                            start_dive_anim(
+                                &area,
+                                Rc::clone(&data),
+                                cluster_id,
+                                Rc::clone(&on_activate),
+                            );
                         } else {
                             status_label.set_text(
                                 "No cluster selected — use Tab to select or N to create one",
@@ -1275,17 +1289,84 @@ fn start_recenter_anim(
     target_x: f64,
     target_y: f64,
 ) {
+    let current_scale = data.borrow().canvas_state.viewport.scale;
+    start_viewport_anim(
+        area,
+        data,
+        target_x,
+        target_y,
+        current_scale,
+        RECENTER_DURATION_MS,
+        None,
+    );
+}
+
+/// Start a cluster-dive animation: ease viewport toward the cluster's center
+/// and zoom in by `DIVE_ZOOM_GAIN`, then invoke `on_dive` to flip zoom level.
+/// If the cluster vanishes between trigger and tick (Sway closed it), the
+/// animation aborts and `on_dive` does not fire.
+fn start_dive_anim(
+    area: &gtk::DrawingArea,
+    data: Rc<RefCell<WidgetState>>,
+    cluster_id: ClusterId,
+    on_dive: Rc<dyn Fn(ClusterId)>,
+) {
+    let target = {
+        let state = data.borrow();
+        state
+            .canvas_state
+            .clusters
+            .iter()
+            .find(|c| c.id == cluster_id)
+            .map(|c| {
+                (
+                    c.x,
+                    c.y,
+                    (state.canvas_state.viewport.scale * DIVE_ZOOM_GAIN)
+                        .clamp(MIN_SCALE, MAX_SCALE),
+                )
+            })
+    };
+    let Some((tx, ty, target_scale)) = target else {
+        return;
+    };
+
+    let on_complete: Box<dyn FnOnce()> = Box::new(move || on_dive(cluster_id));
+    start_viewport_anim(
+        area,
+        data,
+        tx,
+        ty,
+        target_scale,
+        DIVE_DURATION_MS,
+        Some(on_complete),
+    );
+}
+
+fn start_viewport_anim(
+    area: &gtk::DrawingArea,
+    data: Rc<RefCell<WidgetState>>,
+    target_x: f64,
+    target_y: f64,
+    target_scale: f64,
+    duration_ms: f64,
+    on_complete: Option<Box<dyn FnOnce()>>,
+) {
     let generation = {
         let mut state = data.borrow_mut();
         let gen = state.viewport_anim.as_ref().map_or(1, |a| a.generation + 1);
+        let start_scale = state.canvas_state.viewport.scale;
         state.viewport_anim = Some(ViewportAnim {
             start_x: state.canvas_state.viewport.x,
             start_y: state.canvas_state.viewport.y,
             target_x,
             target_y,
+            start_scale,
+            target_scale,
             start: Instant::now(),
-            duration_ms: RECENTER_DURATION_MS,
+            duration_ms,
             generation: gen,
+            on_complete,
         });
         state.has_local_viewport = true;
         gen
@@ -1293,7 +1374,6 @@ fn start_recenter_anim(
 
     let area = area.clone();
     glib::timeout_add_local(Duration::from_millis(16), move || {
-        // Read animation params without holding mutable borrow
         let tick = {
             let state = data.borrow();
             if state.viewport_anim.as_ref().map(|a| a.generation) != Some(generation) {
@@ -1306,18 +1386,23 @@ fn start_recenter_anim(
             (
                 anim.start_x + (anim.target_x - anim.start_x) * te,
                 anim.start_y + (anim.target_y - anim.start_y) * te,
+                anim.start_scale + (anim.target_scale - anim.start_scale) * te,
                 t >= 1.0,
             )
         };
-        let (new_x, new_y, done) = tick;
+        let (new_x, new_y, new_scale, done) = tick;
 
         let mut state = data.borrow_mut();
         state.canvas_state.viewport.x = new_x;
         state.canvas_state.viewport.y = new_y;
+        state.canvas_state.viewport.scale = new_scale;
         area.queue_draw();
 
         if done {
-            state.viewport_anim = None;
+            // Take the anim out so on_complete fires exactly once even if the
+            // callback re-enters this module (e.g. start_dive_anim → on_dive →
+            // overlay hide → next session re-uses data).
+            let completed = state.viewport_anim.take();
             let dx = new_x - state.daemon_viewport.x;
             let dy = new_y - state.daemon_viewport.y;
             if dx.abs() > 0.5 || dy.abs() > 0.5 {
@@ -1328,6 +1413,12 @@ fn start_recenter_anim(
                 });
                 state.daemon_viewport.x = new_x;
                 state.daemon_viewport.y = new_y;
+            }
+            drop(state);
+            if let Some(mut anim) = completed {
+                if let Some(cb) = anim.on_complete.take() {
+                    cb();
+                }
             }
             return glib::ControlFlow::Break;
         }
