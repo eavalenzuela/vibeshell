@@ -15,6 +15,8 @@ mod ipc;
 mod keybindings;
 mod model;
 mod state;
+#[cfg(feature = "udev")]
+mod udev;
 mod winit;
 #[cfg(feature = "xwayland")]
 mod xwayland;
@@ -28,7 +30,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let display: Display<Vibewm> = Display::new()?;
     let mut state = Vibewm::new(&mut event_loop, display);
 
-    crate::winit::init_winit(&mut event_loop, &mut state)?;
+    // Backend selection: VIBEWM_BACKEND=udev runs as a real DRM session
+    // compositor (requires --features udev). Default = winit-in-a-window for
+    // dev. Both backends share the same wayland-server / IPC / xwayland setup
+    // below.
+    let backend = std::env::var("VIBEWM_BACKEND").unwrap_or_else(|_| "winit".into());
+    match backend.as_str() {
+        "udev" | "drm" => {
+            #[cfg(feature = "udev")]
+            crate::udev::run_udev(&mut event_loop, &mut state)?;
+            #[cfg(not(feature = "udev"))]
+            return Err("VIBEWM_BACKEND=udev requires building with --features udev".into());
+        }
+        _ => {
+            crate::winit::init_winit(&mut event_loop, &mut state)?;
+        }
+    }
     crate::ipc::init_ipc(&mut event_loop)?;
     #[cfg(feature = "xwayland")]
     crate::xwayland::start_xwayland(&mut event_loop, &state);

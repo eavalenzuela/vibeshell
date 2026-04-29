@@ -87,6 +87,11 @@ pub struct Vibewm {
     /// Used to derive the `DISPLAY` env var for X11 child processes.
     #[cfg(feature = "xwayland")]
     pub xdisplay: Option<u32>,
+
+    /// DRM/KMS backend state. `Some` after `udev::run_udev` has initialized
+    /// the seat + first DRM device. Stays `None` under `VIBEWM_BACKEND=winit`.
+    #[cfg(feature = "udev")]
+    pub udev: Option<crate::udev::UdevState>,
 }
 
 impl Vibewm {
@@ -141,6 +146,8 @@ impl Vibewm {
             xwm: None,
             #[cfg(feature = "xwayland")]
             xdisplay: None,
+            #[cfg(feature = "udev")]
+            udev: None,
         }
     }
 

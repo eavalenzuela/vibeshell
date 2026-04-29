@@ -10,6 +10,18 @@ default = ["xwayland"]
 # Xwayland-spawning + XwmHandler integration. Disable with
 # `--no-default-features` for a pure-wayland build.
 xwayland = ["smithay/xwayland"]
+# DRM/KMS backend (vs the default winit-in-a-window backend). Enables
+# vibewm to run as a real session compositor on bare metal or in a VM
+# with virtio-gpu. Opt in: `cargo build --features udev`. Selected at
+# runtime by `VIBEWM_BACKEND=udev` (default winit) so a build with both
+# features picks the right one based on env.
+udev = [
+    "smithay/backend_libinput",
+    "smithay/backend_udev",
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_session_libseat",
+]
 
 [dependencies]
 common = { path = "../../crates/common" }
