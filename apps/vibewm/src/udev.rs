@@ -396,9 +396,8 @@ fn open_drm_device(
             },
         );
 
-    // Kick off the first frame via the same retry path used when
-    // `EmptyFrame` fires later.
-    schedule_retry_frame(state, drm_node);
+    // Kick off the first frame ~16ms out (one retrace period).
+    schedule_render_after(state, drm_node, Duration::from_millis(16));
 
     Ok(())
 }
@@ -426,17 +425,13 @@ fn egl_from_gbm(
 /// completion notice. Calling it here would double-ack and confuse the
 /// compositor's internal state.
 fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
-    tracing::debug!(?drm_node, "udev: render_node entry");
     let Some(udev) = state.udev.as_mut() else {
-        tracing::debug!("udev: render_node: udev state missing");
         return;
     };
     let Some(device) = udev.devices.get_mut(&drm_node) else {
-        tracing::debug!("udev: render_node: device entry missing");
         return;
     };
     let Some(comp) = device.drm_compositor.as_mut() else {
-        tracing::debug!("udev: render_node: drm_compositor missing");
         return;
     };
 
@@ -448,13 +443,10 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         .unwrap_or_default();
 
     use smithay::backend::renderer::Color32F;
-    // TEMPORARY DIAGNOSTIC: bright red so we can confirm the screen actually
-    // updates. Will revert to vibeshell's dark theme once we know the path
-    // works end-to-end.
     let render_res = comp.render_frame::<_, _>(
         &mut device.renderer,
         &elements,
-        Color32F::from([1.0, 0.0, 0.0, 1.0]),
+        Color32F::from([0.05, 0.05, 0.07, 1.0]),
         smithay::backend::drm::compositor::FrameFlags::DEFAULT,
     );
     let queue_outcome = match render_res {
@@ -469,11 +461,14 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
     use smithay::backend::drm::compositor::FrameError;
     match queue_outcome {
         Ok(()) => {
-            tracing::debug!("udev: queue_frame ok — waiting for VBlank");
+            // Frame queued. The DrmEvent::VBlank handler will drive the
+            // next render once the compositor finishes scanning out.
         }
         Err(FrameError::EmptyFrame) => {
-            tracing::debug!("udev: queue_frame EmptyFrame — scheduling retry");
-            schedule_retry_frame(state, drm_node);
+            // No damage to commit. Schedule a slow idle poll (1s) so we
+            // re-check eventually even without a wayland commit. The
+            // snappy path is `schedule_render` from the commit handler.
+            schedule_render_after(state, drm_node, Duration::from_secs(1));
         }
         Err(e) => {
             warn!(?e, "udev: queue_frame failed");
@@ -496,18 +491,31 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
     });
 }
 
-/// Schedule another `render_node` attempt one retrace period out. Used when
-/// `queue_frame` returned `EmptyFrame` — without this, an empty render would
-/// stop driving the loop entirely (no buffer in flight = no VBlank).
-fn schedule_retry_frame(state: &Vibewm, drm_node: DrmNode) {
-    let timer = Timer::from_duration(Duration::from_millis(16));
-    match state.loop_handle.insert_source(timer, move |_, _, state| {
-        tracing::debug!("udev: retry timer fired");
+/// Schedule a `render_node` attempt after `delay`. Used by:
+/// - `open_drm_device` to kick the first render after init (delay = 16ms);
+/// - the `EmptyFrame` path as a slow idle poll (delay = 1s) so we don't
+///   chew CPU when nothing's changing — `Vibewm::schedule_udev_render`
+///   is the snappy commit-driven entry point;
+/// - `Vibewm::schedule_udev_render` itself (delay = 1ms) when a wayland
+///   surface commits damage we should react to.
+fn schedule_render_after(state: &Vibewm, drm_node: DrmNode, delay: Duration) {
+    let timer = Timer::from_duration(delay);
+    if let Err(e) = state.loop_handle.insert_source(timer, move |_, _, state| {
         render_node(state, drm_node);
         TimeoutAction::Drop
     }) {
-        Ok(_) => tracing::debug!("udev: retry timer scheduled"),
-        Err(e) => warn!(?e, "udev: failed to schedule retry timer"),
+        warn!(?e, "udev: failed to schedule render timer");
+    }
+}
+
+/// Public entry point for non-udev code (e.g. wayland commit handlers in
+/// `handlers.rs`) to nudge a render. No-op when udev backend isn't active.
+pub fn schedule_render(state: &Vibewm) {
+    let Some(udev) = state.udev.as_ref() else {
+        return;
+    };
+    for &drm_node in udev.devices.keys() {
+        schedule_render_after(state, drm_node, Duration::from_millis(1));
     }
 }
 

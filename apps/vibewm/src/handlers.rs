@@ -91,6 +91,13 @@ impl CompositorHandler for Vibewm {
         handle_xdg_commit(&mut self.popups, &self.space, surface);
         handle_resize_commit(&mut self.space, surface);
         handle_layer_commit(self, surface);
+
+        // A surface commit is damage we should reflect on screen. Under
+        // the udev backend, kick a render on each tracked DRM device. The
+        // helper is a no-op under the winit backend, so this stays
+        // backend-neutral.
+        #[cfg(feature = "udev")]
+        crate::udev::schedule_render(self);
     }
 }
 
