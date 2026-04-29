@@ -448,10 +448,13 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         .unwrap_or_default();
 
     use smithay::backend::renderer::Color32F;
+    // TEMPORARY DIAGNOSTIC: bright red so we can confirm the screen actually
+    // updates. Will revert to vibeshell's dark theme once we know the path
+    // works end-to-end.
     let render_res = comp.render_frame::<_, _>(
         &mut device.renderer,
         &elements,
-        Color32F::from([0.05, 0.05, 0.07, 1.0]),
+        Color32F::from([1.0, 0.0, 0.0, 1.0]),
         smithay::backend::drm::compositor::FrameFlags::DEFAULT,
     );
     let queue_outcome = match render_res {
