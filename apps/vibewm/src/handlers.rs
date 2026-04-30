@@ -445,8 +445,9 @@ impl WlrLayerShellHandler for Vibewm {
             return;
         };
         let output_name = output.name();
+        let layer_surface = LayerSurface::new(surface.clone(), namespace.clone());
         let mut map = layer_map_for_output(&output);
-        match map.map_layer(&LayerSurface::new(surface, namespace.clone())) {
+        match map.map_layer(&layer_surface) {
             Ok(()) => tracing::info!(
                 namespace,
                 output = %output_name,
@@ -457,6 +458,14 @@ impl WlrLayerShellHandler for Vibewm {
                 tracing::warn!(?e, namespace, output = %output_name, "vibewm: layer surface map failed")
             }
         }
+        // smithay's `LayerMap::arrange` populates the pending size but
+        // refuses to send the *initial* configure (per spec: initial
+        // configure must follow the client's initial commit). The
+        // `new_layer_surface` callback fires exactly once, on that initial
+        // commit, so this is where we send it. Without this the client
+        // never receives a size and stays stuck never attaching a buffer.
+        drop(map);
+        surface.send_configure();
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
