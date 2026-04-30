@@ -5,7 +5,7 @@
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, ButtonState, Event, InputBackend, InputEvent, KeyboardKeyEvent,
-    PointerAxisEvent, PointerButtonEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
@@ -45,6 +45,41 @@ impl Vibewm {
                     );
                 }
             }
+            InputEvent::PointerMotion { event, .. } => {
+                // libinput's relative motion. Move the cursor by the delta,
+                // clamped to the first output's geometry.
+                let Some(output) = self.space.outputs().next().cloned() else {
+                    return;
+                };
+                let Some(output_geo) = self.space.output_geometry(&output) else {
+                    return;
+                };
+                let pointer = self.seat.get_pointer().expect("seat has no pointer");
+                let delta = event.delta();
+                let mut pos = pointer.current_location() + delta;
+                pos.x = pos.x.clamp(
+                    output_geo.loc.x as f64,
+                    (output_geo.loc.x + output_geo.size.w) as f64,
+                );
+                pos.y = pos.y.clamp(
+                    output_geo.loc.y as f64,
+                    (output_geo.loc.y + output_geo.size.h) as f64,
+                );
+                let serial = SERIAL_COUNTER.next_serial();
+                let under = self.surface_under(pos);
+                pointer.motion(
+                    self,
+                    under,
+                    &MotionEvent {
+                        location: pos,
+                        serial,
+                        time: event.time_msec(),
+                    },
+                );
+                pointer.frame(self);
+                #[cfg(feature = "udev")]
+                crate::udev::schedule_render(self);
+            }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let Some(output) = self.space.outputs().next().cloned() else {
                     return;
@@ -66,6 +101,8 @@ impl Vibewm {
                     },
                 );
                 pointer.frame(self);
+                #[cfg(feature = "udev")]
+                crate::udev::schedule_render(self);
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().expect("seat has no pointer");
