@@ -471,7 +471,6 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         let loc = ptr.current_location();
         let lx = loc.x as i32;
         let ly = loc.y as i32;
-        tracing::debug!(lx, ly, "udev: cursor at");
         let outer = smithay::utils::Rectangle::new(
             (lx - CURSOR_BORDER, ly - CURSOR_BORDER).into(),
             (
