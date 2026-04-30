@@ -56,9 +56,12 @@ use crate::state::Vibewm;
 /// upgraded to 10-bit on capable hardware in a follow-up.
 const COLOR_FORMAT: Fourcc = Fourcc::Argb8888;
 
-/// Cursor square side, in compositor-logical pixels. A solid white square is
-/// the placeholder until xcursor / client-set cursor surfaces land in W1c-19+.
-const CURSOR_SIZE: i32 = 14;
+/// Inner cursor square side, in compositor-logical pixels. A black square on
+/// a white border, both solid; placeholder until xcursor / client-set cursor
+/// surfaces land.
+const CURSOR_SIZE: i32 = 12;
+/// White outline ring around the cursor — 2 px of border on each side.
+const CURSOR_BORDER: i32 = 2;
 
 // Wrapper enum so the cursor SolidColor element can ride alongside the
 // space's WaylandSurface elements through `DrmCompositor::render_frame`.
@@ -460,28 +463,48 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         .render_elements_for_output(&mut device.renderer, &device.output, 1.0)
         .unwrap_or_default();
 
-    // Cursor element: a small white square at the pointer's current location.
-    // Drawn first → painted last → ends up on top. Replaced by a real
-    // xcursor / client-surface cursor in W1c-19+.
-    let cursor_elem = state.seat.get_pointer().map(|ptr| {
+    // Cursor element: a small black square inside a white border at the
+    // pointer's current location. Drawn first → painted last → on top.
+    // Replaced by a real xcursor / client-surface cursor in W1c-19+.
+    let cursor_elems = state.seat.get_pointer().map(|ptr| {
         let scale = device.output.current_scale().fractional_scale();
         let loc = ptr.current_location();
-        let geo = smithay::utils::Rectangle::new(
-            (loc.x as i32, loc.y as i32).into(),
+        let lx = loc.x as i32;
+        let ly = loc.y as i32;
+        let outer = smithay::utils::Rectangle::new(
+            (lx - CURSOR_BORDER, ly - CURSOR_BORDER).into(),
+            (
+                CURSOR_SIZE + CURSOR_BORDER * 2,
+                CURSOR_SIZE + CURSOR_BORDER * 2,
+            )
+                .into(),
+        );
+        let inner = smithay::utils::Rectangle::new(
+            (lx, ly).into(),
             (CURSOR_SIZE, CURSOR_SIZE).into(),
         );
-        SolidColorRenderElement::new(
+        let white = SolidColorRenderElement::new(
             smithay::backend::renderer::element::Id::new(),
-            geo.to_physical_precise_round(scale),
+            outer.to_physical_precise_round(scale),
             0,
             Color32F::from([1.0, 1.0, 1.0, 1.0]),
             Kind::Cursor,
-        )
+        );
+        let black = SolidColorRenderElement::new(
+            smithay::backend::renderer::element::Id::new(),
+            inner.to_physical_precise_round(scale),
+            0,
+            Color32F::from([0.0, 0.0, 0.0, 1.0]),
+            Kind::Cursor,
+        );
+        // black drawn first → ends up on top of white border.
+        [black, white]
     });
 
-    let mut elements: Vec<OutputRenderElements> = Vec::with_capacity(space_elements.len() + 1);
-    if let Some(c) = cursor_elem {
-        elements.push(OutputRenderElements::Cursor(c));
+    let mut elements: Vec<OutputRenderElements> = Vec::with_capacity(space_elements.len() + 2);
+    if let Some([black, white]) = cursor_elems {
+        elements.push(OutputRenderElements::Cursor(black));
+        elements.push(OutputRenderElements::Cursor(white));
     }
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
 
