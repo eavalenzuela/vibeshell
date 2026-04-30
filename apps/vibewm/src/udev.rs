@@ -31,7 +31,7 @@ use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{render_elements, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
+use smithay::backend::renderer::{Color32F, ImportAll, ImportDmaWl, ImportMem, ImportMemWl};
 use smithay::desktop::space::SpaceRenderElements;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
@@ -63,7 +63,7 @@ const CURSOR_SIZE: i32 = 14;
 // Wrapper enum so the cursor SolidColor element can ride alongside the
 // space's WaylandSurface elements through `DrmCompositor::render_frame`.
 render_elements! {
-    pub OutputRenderElements<R> where R: ImportAll + ImportMem;
+    pub OutputRenderElements<R> where R: ImportAll + ImportMem + ImportMemWl + ImportDmaWl;
     Space=SpaceRenderElements<R, WaylandSurfaceRenderElement<R>>,
     Cursor=SolidColorRenderElement,
 }
