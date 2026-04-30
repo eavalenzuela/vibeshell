@@ -27,7 +27,12 @@ use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, DrmNode};
 use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
+use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::{render_elements, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
+use smithay::desktop::space::SpaceRenderElements;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{UdevBackend, UdevEvent};
@@ -50,6 +55,18 @@ use crate::state::Vibewm;
 /// common denominator and works on virtio-gpu, Intel, AMD, NVIDIA. Could be
 /// upgraded to 10-bit on capable hardware in a follow-up.
 const COLOR_FORMAT: Fourcc = Fourcc::Argb8888;
+
+/// Cursor square side, in compositor-logical pixels. A solid white square is
+/// the placeholder until xcursor / client-set cursor surfaces land in W1c-19+.
+const CURSOR_SIZE: i32 = 14;
+
+// Wrapper enum so the cursor SolidColor element can ride alongside the
+// space's WaylandSurface elements through `DrmCompositor::render_frame`.
+render_elements! {
+    pub OutputRenderElements<R> where R: ImportAll + ImportMem;
+    Space=SpaceRenderElements<R, WaylandSurfaceRenderElement<R>>,
+    Cursor=SolidColorRenderElement,
+}
 
 /// Per-DRM-device state. Today vibewm tracks at most one of these (single
 /// GPU); refactored to a HashMap so multi-GPU is a follow-up addition,
@@ -433,14 +450,39 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         return;
     };
 
-    // Build render elements from the smithay Space. Three args: renderer,
-    // output, alpha (1.0 = fully opaque).
-    let elements = state
+    // Build render elements from the smithay Space (windows + layer
+    // surfaces). Three args: renderer, output, alpha (1.0 = fully opaque).
+    let space_elements = state
         .space
         .render_elements_for_output(&mut device.renderer, &device.output, 1.0)
         .unwrap_or_default();
 
-    use smithay::backend::renderer::Color32F;
+    // Cursor element: a small white square at the pointer's current location.
+    // Drawn first → painted last → ends up on top. Replaced by a real
+    // xcursor / client-surface cursor in W1c-19+.
+    let cursor_elem = state.seat.get_pointer().map(|ptr| {
+        let scale = device.output.current_scale().fractional_scale();
+        let loc = ptr.current_location();
+        let geo = smithay::utils::Rectangle::new(
+            (loc.x as i32, loc.y as i32).into(),
+            (CURSOR_SIZE, CURSOR_SIZE).into(),
+        );
+        SolidColorRenderElement::new(
+            smithay::backend::renderer::element::Id::new(),
+            geo.to_physical_precise_round(scale),
+            0,
+            Color32F::from([1.0, 1.0, 1.0, 1.0]),
+            Kind::Cursor,
+        )
+    });
+
+    let mut elements: Vec<OutputRenderElements<GlesRenderer>> =
+        Vec::with_capacity(space_elements.len() + 1);
+    if let Some(c) = cursor_elem {
+        elements.push(OutputRenderElements::Cursor(c));
+    }
+    elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
+
     let render_res = comp.render_frame::<_, _>(
         &mut device.renderer,
         &elements,
