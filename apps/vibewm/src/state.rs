@@ -173,6 +173,7 @@ impl Vibewm {
             .insert_source(
                 Generic::new(display, Interest::READ, Mode::Level),
                 |_, display, state| {
+                    tracing::debug!("wayland display source: dispatch_clients fired");
                     // SAFETY: the display is owned by the calloop event loop for
                     // the lifetime of this source and never dropped while in use.
                     // Smithay's Generic source exposes `&mut Display` only via
