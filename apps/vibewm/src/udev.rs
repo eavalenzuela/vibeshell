@@ -31,7 +31,7 @@ use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{render_elements, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::{Color32F, ImportAll, ImportDmaWl, ImportMem, ImportMemWl};
+use smithay::backend::renderer::Color32F;
 use smithay::desktop::space::SpaceRenderElements;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
@@ -62,13 +62,12 @@ const CURSOR_SIZE: i32 = 14;
 
 // Wrapper enum so the cursor SolidColor element can ride alongside the
 // space's WaylandSurface elements through `DrmCompositor::render_frame`.
+// Concretely instantiated to GlesRenderer because that's the only renderer
+// the udev backend uses today; the macro's where-clause grammar makes it
+// awkward to keep this generic across multiple trait bounds.
 render_elements! {
-    pub OutputRenderElements<R> where
-        R: smithay::backend::renderer::ImportAll
-         + smithay::backend::renderer::ImportMem
-         + smithay::backend::renderer::ImportMemWl
-         + smithay::backend::renderer::ImportDmaWl;
-    Space=SpaceRenderElements<R, WaylandSurfaceRenderElement<R>>,
+    pub OutputRenderElements<=GlesRenderer>;
+    Space=SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
     Cursor=SolidColorRenderElement,
 }
 
@@ -480,8 +479,7 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         )
     });
 
-    let mut elements: Vec<OutputRenderElements<GlesRenderer>> =
-        Vec::with_capacity(space_elements.len() + 1);
+    let mut elements: Vec<OutputRenderElements> = Vec::with_capacity(space_elements.len() + 1);
     if let Some(c) = cursor_elem {
         elements.push(OutputRenderElements::Cursor(c));
     }
