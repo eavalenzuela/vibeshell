@@ -489,6 +489,13 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
             Some(device.output.clone())
         });
     });
+
+    // Flush queued wayland-server events out to clients. Without this, our
+    // protocol responses (registry globals, configure events, frame
+    // callbacks) sit in the server-side output buffer indefinitely and
+    // clients block forever waiting for responses to their requests. The
+    // winit backend flushes after every redraw; we mirror that here.
+    let _ = state.display_handle.flush_clients();
 }
 
 /// Schedule a `render_node` attempt after `delay`. Used by:
