@@ -405,9 +405,7 @@ fn open_drm_device(
 /// `EGLDisplay::new` is `unsafe` in smithay 0.7 because it doesn't validate
 /// the GBM device pointer at runtime — caller promises it's a live native
 /// display. Wrapping the unsafe block in this helper keeps it localized.
-fn egl_from_gbm(
-    gbm: &GbmDevice<DrmDeviceFd>,
-) -> Result<EGLDisplay, Box<dyn std::error::Error>> {
+fn egl_from_gbm(gbm: &GbmDevice<DrmDeviceFd>) -> Result<EGLDisplay, Box<dyn std::error::Error>> {
     // SAFETY: `gbm` is a live GbmDevice we just created from an open DRM fd
     // owned by the session; it's valid for the lifetime of the resulting
     // EGLDisplay (which we own and don't drop until session teardown).
@@ -441,12 +439,6 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         .space
         .render_elements_for_output(&mut device.renderer, &device.output, 1.0)
         .unwrap_or_default();
-    let mapped = state.space.elements().count();
-    tracing::debug!(
-        elements = elements.len(),
-        mapped_windows = mapped,
-        "udev: render_node frame"
-    );
 
     use smithay::backend::renderer::Color32F;
     let render_res = comp.render_frame::<_, _>(
@@ -531,4 +523,3 @@ pub fn schedule_render(state: &Vibewm) {
         schedule_render_after(state, drm_node, Duration::from_millis(1));
     }
 }
-
