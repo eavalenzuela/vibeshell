@@ -439,6 +439,17 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         .space
         .render_elements_for_output(&mut device.renderer, &device.output, 1.0)
         .unwrap_or_default();
+    let mapped = state.space.elements().count();
+    let layer_count = {
+        let map = smithay::desktop::layer_map_for_output(&device.output);
+        map.layers().count()
+    };
+    tracing::debug!(
+        elements = elements.len(),
+        mapped_windows = mapped,
+        layers = layer_count,
+        "udev: render frame"
+    );
 
     use smithay::backend::renderer::Color32F;
     let render_res = comp.render_frame::<_, _>(

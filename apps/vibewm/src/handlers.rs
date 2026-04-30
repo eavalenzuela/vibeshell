@@ -495,6 +495,7 @@ fn handle_layer_commit(state: &mut Vibewm, surface: &WlSurface) {
             .layer_for_surface(surface, smithay::desktop::WindowSurfaceType::TOPLEVEL)
             .is_some();
         if needs_arrange {
+            tracing::debug!("vibewm: layer commit triggered arrange");
             map.arrange();
         }
     }
