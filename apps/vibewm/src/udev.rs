@@ -63,7 +63,11 @@ const CURSOR_SIZE: i32 = 14;
 // Wrapper enum so the cursor SolidColor element can ride alongside the
 // space's WaylandSurface elements through `DrmCompositor::render_frame`.
 render_elements! {
-    pub OutputRenderElements<R> where R: ImportAll + ImportMem + ImportMemWl + ImportDmaWl;
+    pub OutputRenderElements<R> where
+        R: smithay::backend::renderer::ImportAll
+         + smithay::backend::renderer::ImportMem
+         + smithay::backend::renderer::ImportMemWl
+         + smithay::backend::renderer::ImportDmaWl;
     Space=SpaceRenderElements<R, WaylandSurfaceRenderElement<R>>,
     Cursor=SolidColorRenderElement,
 }
