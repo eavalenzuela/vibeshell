@@ -488,14 +488,20 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
             outer.to_physical_precise_round(scale),
             0,
             Color32F::from([1.0, 1.0, 1.0, 1.0]),
-            Kind::Cursor,
+            // Kind::Cursor would try to put this on the DRM cursor plane,
+            // which is unreliable on virtio-gpu. Unspecified forces the
+            // primary plane via the GLES pipeline.
+            Kind::Unspecified,
         );
         let black = SolidColorRenderElement::new(
             smithay::backend::renderer::element::Id::new(),
             inner.to_physical_precise_round(scale),
             0,
             Color32F::from([0.0, 0.0, 0.0, 1.0]),
-            Kind::Cursor,
+            // Kind::Cursor would try to put this on the DRM cursor plane,
+            // which is unreliable on virtio-gpu. Unspecified forces the
+            // primary plane via the GLES pipeline.
+            Kind::Unspecified,
         );
         // black drawn first → ends up on top of white border.
         [black, white]
