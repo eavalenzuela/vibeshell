@@ -762,6 +762,21 @@ pub(crate) fn dispatch_ipc_request(
                 Err(message) => Ok(IpcResponse::Error { message }),
             }
         }
+        IpcRequest::Subscribe => {
+            // Subscribe is connection-stateful — it can only be served by
+            // the long-lived daemon socket loop in `daemon.rs`, not this
+            // dispatcher (which handles a single request per call). The
+            // socket handler intercepts before reaching here. Subprocess
+            // CLI fall-through (`vibeshellctl ipc subscribe` from a
+            // shell) gets a structured error.
+            Ok(IpcResponse::Error {
+                message: json!({
+                    "error": "subscribe_requires_socket",
+                    "reason": "Subscribe is only supported via the daemon socket; subprocess CLI cannot hold the connection open",
+                })
+                .to_string(),
+            })
+        }
         unsupported => Ok(IpcResponse::Error {
             message: json!({
                 "error": "unsupported_ipc_request",
@@ -1204,6 +1219,8 @@ fn log_ipc_response(response: &IpcResponse, module: &str, windows: usize, worksp
         IpcResponse::Ack => "ack",
         IpcResponse::State(_) => "state",
         IpcResponse::Error { .. } => "error",
+        IpcResponse::Subscribed => "subscribed",
+        IpcResponse::Event(_) => "event",
     };
 
     info!(
@@ -1267,6 +1284,7 @@ mod tests {
                 })
                 .collect(),
             output: OutputState::default(),
+            transition: None,
         }
     }
 
@@ -1352,6 +1370,7 @@ mod tests {
                 manual_position_override: false,
             }],
             output: OutputState::default(),
+            transition: None,
         };
 
         let response = match IpcRequest::GetState {

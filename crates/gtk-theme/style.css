@@ -1,0 +1,289 @@
+/*
+ * vibeshell shared GTK theme.
+ *
+ * Loaded by every GTK app (panel, launcher, notifd, overlay, cheatsheet)
+ * via `gtk_theme::install_theme()` at PRIORITY_APPLICATION. Users can
+ * layer overrides on top via ~/.config/vibeshell/theme.css (loaded at
+ * PRIORITY_USER).
+ *
+ * Palette mirrors vibewm's clear color (#0d0d12) so the GTK clients
+ * visually belong to the same shell as the compositor, not whatever GTK
+ * theme the host system runs.
+ *
+ * Class naming: per-app widgets use `.vibeshell-<app>-<element>`
+ * (`.vibeshell-launcher-panel`, etc.). Apps add classes via
+ * `widget.add_css_class(...)`. Section headers are styled by reusing
+ * Adwaita's `.heading` + a vibeshell tag class.
+ */
+
+/* ── Tokens ────────────────────────────────────────────────────────────
+ * GTK4 CSS doesn't support custom properties on arbitrary selectors,
+ * but @define-color is available and works for color references below.
+ * Numeric tokens (radius, padding) inline at the use site for clarity.
+ */
+@define-color vibeshell_bg            rgba(13, 13, 18, 0.94);
+@define-color vibeshell_bg_lift       rgba(255, 255, 255, 0.04);
+@define-color vibeshell_bg_lift_hover rgba(255, 255, 255, 0.05);
+@define-color vibeshell_border        rgba(255, 255, 255, 0.08);
+@define-color vibeshell_border_subtle rgba(255, 255, 255, 0.06);
+@define-color vibeshell_text          #e8e8ee;
+@define-color vibeshell_text_dim      rgba(232, 232, 238, 0.55);
+@define-color vibeshell_text_muted    rgba(232, 232, 238, 0.45);
+@define-color vibeshell_accent        #4dd2c8;
+@define-color vibeshell_accent_soft   rgba(77, 210, 200, 0.18);
+@define-color vibeshell_accent_glow   rgba(77, 210, 200, 0.85);
+
+/* ── Launcher ──────────────────────────────────────────────────────── */
+
+/* Transparent window background so the panel's rounded corners + drop
+ * shadow show through. Layer-shell mode already drops the chrome via
+ * `set_decorated(false)`; standalone fallback mode does the same and
+ * relies on the host WM honoring the no-chrome request. */
+window.vibeshell-launcher-window,
+window.vibeshell-launcher-window decoration {
+    background: transparent;
+    box-shadow: none;
+}
+
+window.vibeshell-launcher-window > * {
+    background: transparent;
+}
+
+box.vibeshell-launcher-panel {
+    background: @vibeshell_bg;
+    border: 1px solid @vibeshell_border;
+    border-radius: 16px;
+    padding: 16px;
+    /* Soft drop shadow to lift the panel off the (transparent) window. */
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    min-width: 480px;
+    /* GTK4 CSS doesn't support max-width; the parent CenterBox + window
+     * size already caps the panel's outer width in practice. */
+}
+
+entry.vibeshell-launcher-search,
+entry.vibeshell-launcher-search > text {
+    background: @vibeshell_bg_lift;
+    color: @vibeshell_text;
+    border: 1px solid @vibeshell_border_subtle;
+    border-radius: 12px;
+    padding: 12px 16px;
+    font-size: 16px;
+    font-weight: 500;
+    caret-color: @vibeshell_accent;
+}
+
+entry.vibeshell-launcher-search:focus-within {
+    border-color: @vibeshell_accent;
+    box-shadow: 0 0 0 2px @vibeshell_accent_soft;
+}
+
+entry.vibeshell-launcher-search > text > placeholder {
+    color: @vibeshell_text_muted;
+}
+
+list.vibeshell-launcher-list {
+    background: transparent;
+    border: none;
+    margin-top: 12px;
+}
+
+/* Suppress the default `.boxed-list` look (Adwaita-rounded grouped rows) so
+ * our row styling can take over. */
+list.vibeshell-launcher-list.boxed-list,
+list.vibeshell-launcher-list.boxed-list > row {
+    box-shadow: none;
+    border: none;
+    background: transparent;
+}
+
+list.vibeshell-launcher-list > row {
+    background: transparent;
+    border-radius: 10px;
+    padding: 4px 8px;
+    margin: 2px 0;
+    transition: background-color 80ms ease-out;
+}
+
+list.vibeshell-launcher-list > row:hover {
+    background: @vibeshell_bg_lift_hover;
+}
+
+list.vibeshell-launcher-list > row:selected,
+list.vibeshell-launcher-list > row:selected:hover {
+    background: @vibeshell_accent_soft;
+    color: #ffffff;
+}
+
+list.vibeshell-launcher-list > row:selected > * {
+    color: #ffffff;
+}
+
+/* AdwActionRow internals: title is `.title`, subtitle is `.subtitle`. */
+list.vibeshell-launcher-list > row .title {
+    color: @vibeshell_text;
+    font-weight: 500;
+    font-size: 14px;
+}
+
+list.vibeshell-launcher-list > row .subtitle {
+    color: @vibeshell_text_dim;
+    font-size: 12px;
+}
+
+list.vibeshell-launcher-list > row:selected .subtitle {
+    color: rgba(255, 255, 255, 0.75);
+}
+
+/* Section headers between categories (Apps / Windows / Clusters).
+ * `padding-left` lines the header text up with the row title text by
+ * jumping past the prefix-icon gutter (~32 px icon + 8 px gap + 8 px
+ * row inset = 48 px). */
+label.vibeshell-launcher-section-header {
+    color: @vibeshell_accent_glow;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 12px 4px 4px 48px;
+    margin: 0;
+}
+
+/* Icons in the prefix slot — tone down the contrast so they don't
+ * compete with the title text. */
+list.vibeshell-launcher-list > row image {
+    -gtk-icon-size: 24px;
+    margin: 2px 8px 2px 0;
+    opacity: 0.92;
+}
+
+/* ── Panel ─────────────────────────────────────────────────────────── */
+
+window.vibeshell-panel-window,
+window.vibeshell-panel-window decoration {
+    background: @vibeshell_bg;
+    box-shadow: none;
+}
+
+centerbox.vibeshell-panel-content {
+    background: @vibeshell_bg;
+    border-bottom: 1px solid @vibeshell_border;
+    padding: 0 4px;
+    color: @vibeshell_text;
+}
+
+box.vibeshell-workspaces {
+    margin: 0 8px;
+}
+
+button.vibeshell-workspace-button {
+    background: transparent;
+    color: @vibeshell_text_dim;
+    border: none;
+    border-radius: 8px;
+    padding: 2px 12px;
+    margin: 4px 2px;
+    font-weight: 500;
+    transition: background-color 80ms ease-out, color 80ms ease-out;
+}
+
+button.vibeshell-workspace-button:hover {
+    background: @vibeshell_bg_lift_hover;
+    color: @vibeshell_text;
+}
+
+button.vibeshell-workspace-button.workspace-focused {
+    background: @vibeshell_accent_soft;
+    color: #ffffff;
+}
+
+button.vibeshell-workspace-button.workspace-visible {
+    color: @vibeshell_text;
+}
+
+button.vibeshell-workspace-button.workspace-urgent {
+    background: rgba(255, 122, 89, 0.18);
+    color: #ff7a59;
+}
+
+label.vibeshell-panel-title {
+    color: @vibeshell_text;
+    font-weight: 500;
+    font-size: 13px;
+}
+
+label.vibeshell-panel-clock {
+    color: @vibeshell_text;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+    padding: 0 6px;
+}
+
+label.vibeshell-panel-status {
+    color: @vibeshell_text_dim;
+    font-size: 12px;
+}
+
+label.vibeshell-panel-power {
+    color: @vibeshell_text_dim;
+    font-size: 14px;
+    padding: 0 4px;
+}
+
+label.vibeshell-panel-power:hover {
+    color: @vibeshell_accent;
+}
+
+/* ── Cheatsheet ────────────────────────────────────────────────────── */
+
+window.vibeshell-cheatsheet-window,
+window.vibeshell-cheatsheet-window decoration {
+    background: transparent;
+    box-shadow: none;
+}
+
+box.vibeshell-cheatsheet-panel {
+    background: @vibeshell_bg;
+    border: 1px solid @vibeshell_border;
+    border-radius: 16px;
+    padding: 20px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    color: @vibeshell_text;
+}
+
+label.vibeshell-cheatsheet-title {
+    color: @vibeshell_text;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+label.vibeshell-cheatsheet-hint {
+    color: @vibeshell_text_muted;
+    font-size: 11px;
+    padding-bottom: 8px;
+}
+
+label.vibeshell-cheatsheet-section-header {
+    color: @vibeshell_accent_glow;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-top: 16px;
+    margin-bottom: 4px;
+}
+
+box.vibeshell-cheatsheet-row {
+    padding: 4px 0;
+}
+
+label.vibeshell-cheatsheet-key {
+    color: @vibeshell_accent;
+    font-family: "JetBrains Mono", "Fira Mono", "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+}
+
+label.vibeshell-cheatsheet-desc {
+    color: @vibeshell_text;
+    font-size: 13px;
+}

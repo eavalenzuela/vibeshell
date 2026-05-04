@@ -43,7 +43,8 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_pointer_gestures, delegate_seat, delegate_shm, delegate_xdg_decoration,
+    delegate_xdg_shell,
 };
 
 use crate::grabs::{handle_resize_commit, MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab};
@@ -128,8 +129,13 @@ impl SeatHandler for Vibewm {
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
-        _image: smithay::input::pointer::CursorImageStatus,
+        image: smithay::input::pointer::CursorImageStatus,
     ) {
+        self.cursor_status = image;
+        // The pointer just told us to swap glyph/surface — kick a render so
+        // the change is visible without waiting on the next surface commit.
+        #[cfg(feature = "udev")]
+        crate::udev::schedule_render(self);
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
@@ -141,6 +147,7 @@ impl SeatHandler for Vibewm {
 }
 
 delegate_seat!(Vibewm);
+delegate_pointer_gestures!(Vibewm);
 
 // --- Data device (clipboard / DnD) ---
 

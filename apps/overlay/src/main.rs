@@ -23,7 +23,12 @@ fn main() {
         .application_id("com.vibeshell.overlay")
         .build();
 
-    app.connect_activate(build_ui);
+    app.connect_activate(|app| {
+        if let Some(display) = gtk4::gdk::Display::default() {
+            gtk_theme::install_theme(&display);
+        }
+        build_ui(app);
+    });
     app.run();
 }
 
@@ -116,17 +121,63 @@ fn build_ui(app: &adw::Application) {
     // Vibewm-control event subscribe — usable under WM_BACKEND=wlroots. Reuses
     // wm::WlrootsBackend::spawn_event_stream which already returns a
     // Receiver<WmSignal>. Silently no-ops if vibewm isn't running.
+    {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            use wm::WmBackend;
+            let backend = match wm::WlrootsBackend::connect() {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            let stream = match backend.spawn_event_stream() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            while stream.recv().is_ok() {
+                if tx.send(()).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // W1c-25-7: daemon-side state-change subscribe. The daemon pushes
+    // `IpcResponse::Event(StateChanged)` for every successful mutation
+    // (zoom-in/out-mode, cluster activation, transitions, etc.) — many
+    // of which don't ride on a WM event because they're pure state-store
+    // mutations. Without this, Cluster→Overview transitions in
+    // wlroots-mode would only be observed on the 1200ms baseline poll,
+    // missing the W1c-25-1 undive animation trigger window.
     thread::spawn(move || {
-        use wm::WmBackend;
-        let backend = match wm::WlrootsBackend::connect() {
-            Ok(b) => b,
-            Err(_) => return,
-        };
-        let stream = match backend.spawn_event_stream() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        let socket_path = common::contracts::daemon_socket_path();
+        let stream = match UnixStream::connect(&socket_path) {
             Ok(s) => s,
             Err(_) => return,
         };
-        while stream.recv().is_ok() {
+        let mut writer = match stream.try_clone() {
+            Ok(w) => w,
+            Err(_) => return,
+        };
+        let request = match serde_json::to_string(&IpcRequest::Subscribe) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if writeln!(writer, "{request}").is_err() || writer.flush().is_err() {
+            return;
+        }
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            // Initial Subscribed reply OR subsequent Event(_) lines —
+            // either way it means daemon state changed (or just came up).
             if tx.send(()).is_err() {
                 break;
             }
@@ -182,6 +233,9 @@ fn fetch_state_via_ipc() -> Option<CanvasState> {
     let response: IpcResponse = serde_json::from_slice(&output.stdout).ok()?;
     match response {
         IpcResponse::State(state) => Some(state),
-        IpcResponse::Ack | IpcResponse::Error { .. } => None,
+        IpcResponse::Ack
+        | IpcResponse::Error { .. }
+        | IpcResponse::Subscribed
+        | IpcResponse::Event(_) => None,
     }
 }

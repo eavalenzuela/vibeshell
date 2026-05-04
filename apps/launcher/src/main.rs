@@ -399,6 +399,12 @@ fn main() {
         .build();
 
     app.connect_activate(move |app| {
+        // Install the shared vibeshell GTK theme as soon as the default
+        // display is available. Must run before any widget is realized so
+        // the first paint already reflects our palette, not Adwaita's.
+        if let Some(display) = gtk4::gdk::Display::default() {
+            gtk_theme::install_theme(&display);
+        }
         let (_, reload_rx) = common::spawn_reload_listener();
         build_ui(app, apps.clone(), launcher_config.clone(), reload_rx)
     });
@@ -419,6 +425,7 @@ fn build_ui(
         .build();
 
     window.set_resizable(false);
+    window.add_css_class("vibeshell-launcher-window");
 
     let runtime_config = Arc::new(Mutex::new(RuntimeLauncherConfig {
         max_results: launcher_config.max_results,
@@ -435,6 +442,12 @@ fn build_ui(
         window.set_anchor(layer_shell::Edge::Left, true);
         window.set_anchor(layer_shell::Edge::Right, true);
     } else {
+        // Fall back to a regular GTK window. Hide the title bar (the host
+        // WM may still draw SSD — mutter on GNOME ignores this — but on
+        // sway / Wayfire / KDE this gives us a chrome-free window so the
+        // panel's rounded corners + drop shadow show off properly).
+        // Window background stays transparent via CSS so the panel floats.
+        window.set_decorated(false);
         tracing::warn!("layer shell protocol unavailable; falling back to a regular GTK window");
         eprintln!(
             "launcher: compositor does not support zwlr_layer_shell_v1; using regular window mode."
@@ -449,13 +462,16 @@ fn build_ui(
         .margin_start(20)
         .margin_end(20)
         .build();
+    panel.add_css_class("vibeshell-launcher-panel");
 
     let input = gtk::Entry::builder()
         .placeholder_text(ResultFilter::All.placeholder())
         .build();
+    input.add_css_class("vibeshell-launcher-search");
 
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
+    list.add_css_class("vibeshell-launcher-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
 
     panel.append(&input);
@@ -496,6 +512,7 @@ fn build_ui(
                         .build();
                     label.add_css_class("dim-label");
                     label.add_css_class("heading");
+                    label.add_css_class("vibeshell-launcher-section-header");
                     row.set_header(Some(&label));
                 } else {
                     row.set_header(None::<&gtk::Widget>);
@@ -887,6 +904,12 @@ fn populate_search_results(
             .subtitle(result.display_subtitle())
             .build();
         row.set_activatable(true);
+        // Single-line subtitles with ellipsis. Without this AdwActionRow
+        // wraps the subtitle to as many lines as it needs, blowing out
+        // the row height on apps with long alias/keyword lists (Terminal,
+        // Calculator). 1 line keeps the list scannable and the geometry
+        // stable per row.
+        row.set_subtitle_lines(1);
         if let Some(icon_name) = result.icon_name() {
             let image = gtk::Image::from_icon_name(icon_name);
             row.add_prefix(&image);
@@ -1151,6 +1174,7 @@ mod tests {
                 },
             ],
             output: OutputState::default(),
+            transition: None,
         }
     }
 

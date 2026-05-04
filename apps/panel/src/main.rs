@@ -77,6 +77,10 @@ fn main() {
             return;
         };
 
+        if let Some(display) = gtk4::gdk::Display::default() {
+            gtk_theme::install_theme(&display);
+        }
+
         build_ui(
             app,
             panel_config.clone(),
@@ -100,6 +104,7 @@ fn build_ui(
         .build();
 
     window.set_size_request(-1, panel_config.height);
+    window.add_css_class("vibeshell-panel-window");
 
     let runtime_config = Arc::new(Mutex::new(initial_runtime_config));
 
@@ -132,6 +137,7 @@ fn build_ui(
 
     let title = gtk::Label::new(Some(""));
     title.set_halign(gtk::Align::Center);
+    title.add_css_class("vibeshell-panel-title");
 
     let clock = gtk::Label::new(Some(
         &Local::now()
@@ -144,11 +150,17 @@ fn build_ui(
             .to_string(),
     ));
     clock.set_halign(gtk::Align::End);
+    clock.add_css_class("vibeshell-panel-clock");
 
     let audio = gtk::Label::new(Some("🔇 audio N/A"));
     let network = gtk::Label::new(Some("📶 network N/A"));
     let battery = gtk::Label::new(Some("🔋 battery N/A"));
     let power = gtk::Label::new(Some("⏻"));
+    audio.add_css_class("vibeshell-panel-status");
+    network.add_css_class("vibeshell-panel-status");
+    battery.add_css_class("vibeshell-panel-status");
+    power.add_css_class("vibeshell-panel-status");
+    power.add_css_class("vibeshell-panel-power");
 
     let right_section = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -156,6 +168,7 @@ fn build_ui(
         .halign(gtk::Align::End)
         .build();
     right_section.set_margin_end(panel_config.margin_end);
+    right_section.add_css_class("vibeshell-panel-right");
     right_section.append(&audio);
     right_section.append(&network);
     right_section.append(&battery);
@@ -166,6 +179,7 @@ fn build_ui(
         .orientation(gtk::Orientation::Horizontal)
         .hexpand(true)
         .build();
+    content.add_css_class("vibeshell-panel-content");
     content.set_start_widget(Some(&workspaces));
     content.set_center_widget(Some(&title));
     content.set_end_widget(Some(&right_section));

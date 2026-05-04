@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use common::contracts::{ClusterId, WindowId};
 use serde::{Deserialize, Serialize};
 
+use crate::backend::WmSignal;
+
 use crate::facts::WmFacts;
 use crate::layout::LayoutOp;
 
@@ -74,11 +76,39 @@ pub enum VibewmResponse {
 
 /// Events vibewm pushes to subscribed clients.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind")]
+#[serde(tag = "kind", content = "data")]
 pub enum VibewmEvent {
     /// A workspace or window changed (created, destroyed, focused, retitled).
     /// Clients re-snapshot in response. Mirrors `WmSignal::WorkspaceOrWindow`.
     WorkspaceOrWindow,
+    /// A cluster's windows finished (re)mapping into the smithay `Space`
+    /// after an activation. Fired by vibewm at the end of
+    /// `sync_cluster_visibility`. The daemon uses this to sequence
+    /// overlay's zoom-out animation against vibewm's actual remap (W1c-25-1
+    /// closes the seam where overlay finished its dive but vibewm hadn't
+    /// mapped windows yet).
+    ClusterMapped {
+        cluster: ClusterId,
+        window_count: u32,
+    },
+}
+
+impl VibewmEvent {
+    /// Translate a wire event into the daemon-side `WmSignal` channel
+    /// pumped by `WlrootsBackend::spawn_event_stream`. Returns `None` for
+    /// events that have no daemon-side counterpart yet.
+    pub fn to_signal(self) -> Option<WmSignal> {
+        match self {
+            VibewmEvent::WorkspaceOrWindow => Some(WmSignal::WorkspaceOrWindow),
+            VibewmEvent::ClusterMapped {
+                cluster,
+                window_count,
+            } => Some(WmSignal::ClusterMapped {
+                cluster,
+                window_count,
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -112,5 +142,40 @@ mod tests {
         std::env::set_var("VIBEWM_SOCKET", "/tmp/test-vibewm.sock");
         assert_eq!(vibewm_socket_path(), PathBuf::from("/tmp/test-vibewm.sock"));
         std::env::remove_var("VIBEWM_SOCKET");
+    }
+
+    #[test]
+    fn cluster_mapped_event_round_trips_through_json() {
+        let event = VibewmEvent::ClusterMapped {
+            cluster: 7,
+            window_count: 3,
+        };
+        let s = serde_json::to_string(&event).unwrap();
+        let back: VibewmEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn workspace_or_window_event_translates_to_signal() {
+        assert_eq!(
+            VibewmEvent::WorkspaceOrWindow.to_signal(),
+            Some(WmSignal::WorkspaceOrWindow)
+        );
+    }
+
+    #[test]
+    fn cluster_mapped_event_translates_to_signal() {
+        let signal = VibewmEvent::ClusterMapped {
+            cluster: 42,
+            window_count: 2,
+        }
+        .to_signal();
+        assert_eq!(
+            signal,
+            Some(WmSignal::ClusterMapped {
+                cluster: 42,
+                window_count: 2,
+            })
+        );
     }
 }

@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use common::contracts::{CanvasState, Cluster, ClusterId, Viewport, Window, ZoomLevel};
+use common::contracts::{
+    CanvasState, Cluster, ClusterId, Viewport, Window, ZoomLevel, ZoomTransition,
+};
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
@@ -105,6 +107,10 @@ struct WidgetState {
     prev_drag_dy: f64,
     viewport_anim: Option<ViewportAnim>,
     inertia_active: bool,
+    /// `started_at_ms` of the last `ZoomTransition` we acted on. Prevents
+    /// the W1c-25-1 undive animation from restarting every poll for the
+    /// duration the transition is observable.
+    last_handled_transition_at: Option<u64>,
 }
 
 impl OverviewCanvas {
@@ -156,6 +162,7 @@ impl OverviewCanvas {
             prev_drag_dy: 0.0,
             viewport_anim: None,
             inertia_active: false,
+            last_handled_transition_at: None,
         }));
 
         area.set_draw_func({
@@ -760,6 +767,13 @@ impl OverviewCanvas {
     }
 
     pub fn set_canvas_state(&self, state: CanvasState) {
+        // W1c-25-1: detect a fresh Cluster→Overview transition before
+        // overwriting `canvas_state` so we can trigger the undive animation
+        // with the cluster id. We do the actual `start_undive_anim` call
+        // *after* dropping the borrow, since the animation needs &mut self
+        // via `data.borrow_mut`.
+        let undive_target: Option<ClusterId> = pending_undive_target(&self.data, &state);
+
         let mut data = self.data.borrow_mut();
         data.interaction.sync_zoom(state.zoom.clone());
 
@@ -780,6 +794,9 @@ impl OverviewCanvas {
         data.canvas_state.viewport = effective_viewport;
         if preserve {
             data.canvas_state.viewport = local_viewport;
+        }
+        if let Some(t) = data.canvas_state.transition.as_ref() {
+            data.last_handled_transition_at = Some(t.started_at_ms);
         }
 
         if !data
@@ -803,7 +820,37 @@ impl OverviewCanvas {
 
         update_status(&data, &self.status_label);
         self.area.queue_draw();
+        drop(data);
+        if let Some(cluster_id) = undive_target {
+            start_undive_anim(&self.area, Rc::clone(&self.data), cluster_id);
+        }
     }
+}
+
+/// Inspect the incoming canvas state and decide whether to fire an undive
+/// animation: only if the daemon stamped a fresh `Cluster→Overview`
+/// transition we haven't already acted on. Returns the source cluster id.
+fn pending_undive_target(
+    data: &Rc<RefCell<WidgetState>>,
+    incoming: &CanvasState,
+) -> Option<ClusterId> {
+    let transition: &ZoomTransition = incoming.transition.as_ref()?;
+    let from_cluster = match transition.from {
+        ZoomLevel::Cluster(id) => id,
+        _ => return None,
+    };
+    if !matches!(transition.to, ZoomLevel::Overview) {
+        return None;
+    }
+    let state = data.borrow();
+    if state.last_handled_transition_at == Some(transition.started_at_ms) {
+        return None;
+    }
+    // Skip if the user is mid-drag/move — they don't want a viewport jump.
+    if state.drag_mode.is_some() || state.move_mode.is_some() {
+        return None;
+    }
+    Some(from_cluster)
 }
 
 fn width(area: &gtk::DrawingArea) -> f64 {
@@ -1297,6 +1344,66 @@ fn start_recenter_anim(
         target_y,
         current_scale,
         RECENTER_DURATION_MS,
+        None,
+    );
+}
+
+/// Symmetric exit of `start_dive_anim`: when overlay observes a
+/// `Cluster(c) → Overview` transition (W1c-25-3), seed the viewport at the
+/// cluster's dived-in pose and animate back out to the previous overview
+/// pose. This makes the user's exit feel like a continuous zoom-out rather
+/// than a hard cut from a tiled cluster to the empty canvas.
+///
+/// We don't know the *exact* pre-dive viewport (overlay state can be lost
+/// across overlay restarts), so we target the daemon-acknowledged viewport
+/// — that's whatever the user last panned/zoomed to in Overview. If the
+/// cluster doesn't exist anymore (closed mid-flight) we skip the animation.
+fn start_undive_anim(
+    area: &gtk::DrawingArea,
+    data: Rc<RefCell<WidgetState>>,
+    cluster_id: ClusterId,
+) {
+    let seed = {
+        let state = data.borrow();
+        state
+            .canvas_state
+            .clusters
+            .iter()
+            .find(|c| c.id == cluster_id)
+            .map(|c| {
+                let scale =
+                    (state.daemon_viewport.scale * DIVE_ZOOM_GAIN).clamp(MIN_SCALE, MAX_SCALE);
+                (c.x, c.y, scale)
+            })
+    };
+    let Some((seed_x, seed_y, seed_scale)) = seed else {
+        return;
+    };
+    // Snap viewport to the dived pose first, so the animation visually
+    // departs from where the cluster appeared in fullscreen, not from
+    // wherever the daemon-overview viewport happened to be.
+    {
+        let mut state = data.borrow_mut();
+        state.canvas_state.viewport.x = seed_x;
+        state.canvas_state.viewport.y = seed_y;
+        state.canvas_state.viewport.scale = seed_scale;
+        state.has_local_viewport = true;
+    }
+    let (target_x, target_y, target_scale) = {
+        let state = data.borrow();
+        (
+            state.daemon_viewport.x,
+            state.daemon_viewport.y,
+            state.daemon_viewport.scale,
+        )
+    };
+    start_viewport_anim(
+        area,
+        data,
+        target_x,
+        target_y,
+        target_scale,
+        DIVE_DURATION_MS,
         None,
     );
 }

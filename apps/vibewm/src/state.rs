@@ -10,6 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
 use smithay::desktop::{PopupManager, Space, Window, WindowSurfaceType};
+use smithay::input::pointer::{CursorIcon, CursorImageStatus};
 use smithay::input::{Seat, SeatState};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction};
@@ -19,6 +20,7 @@ use smithay::reexports::wayland_server::{Display, DisplayHandle};
 use smithay::utils::{Logical, Point};
 use smithay::wayland::compositor::{CompositorClientState, CompositorState};
 use smithay::wayland::output::OutputManagerState;
+use smithay::wayland::pointer_gestures::PointerGesturesState;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
@@ -31,6 +33,9 @@ use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::X11Wm;
 use wm::layout::WindowId;
 
+#[cfg(feature = "udev")]
+use crate::cursor::CursorTheme;
+use crate::gestures::GestureState;
 use crate::model::VibewmModel;
 
 pub struct Vibewm {
@@ -54,6 +59,11 @@ pub struct Vibewm {
     /// Held to keep the xdg-output global alive for the compositor's lifetime.
     #[allow(dead_code)]
     pub output_manager_state: OutputManagerState,
+    /// Held to keep the wp-pointer-gestures-v1 global alive. Smithay routes
+    /// `PointerHandle::gesture_*` events to subscribed clients automatically;
+    /// we just need this to exist so clients can bind the global.
+    #[allow(dead_code)]
+    pub pointer_gestures_state: PointerGesturesState,
     pub seat_state: SeatState<Vibewm>,
     pub data_device_state: DataDeviceState,
     pub seat: Seat<Self>,
@@ -71,6 +81,11 @@ pub struct Vibewm {
     /// Last known logical position for each window, captured before unmapping
     /// on cluster switch so we can re-map at the same spot on reactivation.
     pub last_known_position: HashMap<WindowId, (i32, i32)>,
+
+    /// In-flight per-window position animations (W1c-25-4). Populated by
+    /// `apply_layout_ops`, consumed by `tick_window_anims` from the render
+    /// loop. Empty when no layout transition is active — the common case.
+    pub window_anims: HashMap<WindowId, crate::anim::WindowAnim>,
 
     /// Holds the xwayland_shell_v1 protocol global so X11 clients can
     /// associate their wl_surface with their X11 window. Initialized
@@ -92,6 +107,24 @@ pub struct Vibewm {
     /// the seat + first DRM device. Stays `None` under `VIBEWM_BACKEND=winit`.
     #[cfg(feature = "udev")]
     pub udev: Option<crate::udev::UdevState>,
+
+    /// Latest cursor image requested by clients (or default-named at boot).
+    /// Updated from `SeatHandler::cursor_image`; consumed by the udev backend's
+    /// per-frame render loop. Tracked under both backends so the seat handler
+    /// can stay backend-agnostic — the winit backend just doesn't read it.
+    pub cursor_status: CursorImageStatus,
+
+    /// xcursor theme cache. Lazy-loads cursor glyphs on first use. Only the
+    /// udev (DRM/KMS) backend renders its own cursor; under winit the host
+    /// compositor draws one.
+    #[cfg(feature = "udev")]
+    pub cursor_theme: CursorTheme,
+
+    /// Touchpad gesture accumulator (pinch + 3-finger swipe → IPC). Lives on
+    /// state so begin/update/end events across the input source share one
+    /// state machine. Only libinput (udev backend) emits gesture events;
+    /// winit doesn't, so this stays inert under that backend.
+    pub gestures: GestureState,
 }
 
 impl Vibewm {
@@ -106,6 +139,7 @@ impl Vibewm {
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let pointer_gestures_state = PointerGesturesState::new::<Self>(&dh);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
@@ -134,12 +168,14 @@ impl Vibewm {
             layer_shell_state,
             shm_state,
             output_manager_state,
+            pointer_gestures_state,
             seat_state,
             data_device_state,
             seat,
             event_subscribers: Vec::new(),
             model: VibewmModel::new(),
             last_known_position: HashMap::new(),
+            window_anims: HashMap::new(),
             #[cfg(feature = "xwayland")]
             xwayland_shell_state,
             #[cfg(feature = "xwayland")]
@@ -148,6 +184,10 @@ impl Vibewm {
             xdisplay: None,
             #[cfg(feature = "udev")]
             udev: None,
+            cursor_status: CursorImageStatus::Named(CursorIcon::Default),
+            #[cfg(feature = "udev")]
+            cursor_theme: CursorTheme::new(),
+            gestures: GestureState::new(),
         }
     }
 

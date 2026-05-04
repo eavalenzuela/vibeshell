@@ -23,7 +23,7 @@ use common::contracts::{ClusterId, WindowId};
 use crate::backend::{BackendError, WmBackend, WmSignal};
 use crate::facts::WmFacts;
 use crate::layout::LayoutOp;
-use crate::vibewm_ipc::{vibewm_socket_path, VibewmEvent, VibewmRequest, VibewmResponse};
+use crate::vibewm_ipc::{vibewm_socket_path, VibewmRequest, VibewmResponse};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -226,9 +226,11 @@ impl WmBackend for WlrootsBackend {
                     }
                 }
                 match serde_json::from_str::<VibewmResponse>(line.trim()) {
-                    Ok(VibewmResponse::Event(VibewmEvent::WorkspaceOrWindow)) => {
-                        if tx.send(WmSignal::WorkspaceOrWindow).is_err() {
-                            break;
+                    Ok(VibewmResponse::Event(event)) => {
+                        if let Some(signal) = event.to_signal() {
+                            if tx.send(signal).is_err() {
+                                break;
+                            }
                         }
                     }
                     Ok(other) => {

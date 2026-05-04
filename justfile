@@ -35,6 +35,7 @@ smoke-binaries:
     cargo build -p cheatsheet --bins
     cargo build -p vibeshellctl --bins
     cargo build -p vibewm --bins
+    cargo build -p wm --bin mock-vibewm-control
 
 # vibewm dev — boots the wlroots-style compositor in a winit window.
 # Pass a "-- <cmd>" suffix to spawn a client into it on startup.
@@ -56,10 +57,15 @@ test:
 smoke-test:
     ./scripts/smoke-test
 
+# Headless smoke test against the wlroots backend path (uses
+# `mock-vibewm-control` instead of a real vibewm — no GPU needed).
+smoke-test-wlroots:
+    ./scripts/smoke-test-wlroots
+
 demo:
     ./scripts/demo
 
-ci: fmt-check clippy check test smoke-binaries
+ci: fmt-check clippy check test smoke-binaries smoke-test-wlroots
 
 run-ctl *args:
     cargo run -p vibeshellctl -- {{args}}

@@ -201,7 +201,12 @@ fn main() {
         .application_id("com.vibeshell.notifd")
         .build();
 
-    app.connect_activate(move |app| build_ui(app, notifd_config.clone()));
+    app.connect_activate(move |app| {
+        if let Some(display) = gtk4::gdk::Display::default() {
+            gtk_theme::install_theme(&display);
+        }
+        build_ui(app, notifd_config.clone());
+    });
     app.run();
 }
 

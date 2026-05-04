@@ -594,6 +594,7 @@ mod tests {
                 .map(|window_id| fixture_window(*window_id, cluster_id))
                 .collect(),
             output: OutputState::default(),
+            transition: None,
         };
 
         CanvasModel::new(state, cluster_id).expect("fixture model should be valid")
@@ -640,6 +641,7 @@ mod tests {
                 manual_position_override: false,
             }],
             output: OutputState::default(),
+            transition: None,
         }
     }
 
@@ -847,6 +849,7 @@ mod tests {
                 },
             ],
             output: OutputState::default(),
+            transition: None,
         };
 
         let model = CanvasModel::new(state, 1).expect("valid model");

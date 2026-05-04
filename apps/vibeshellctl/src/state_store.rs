@@ -58,8 +58,10 @@
 //! (no optimistic-CAS is enforced by the daemon).
 
 use std::collections::{BTreeMap, HashSet};
+use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::contracts::{
     CanvasState, ClusterId, ContextStripDirection, Viewport, Window, WindowId, WindowRole,
@@ -136,6 +138,13 @@ pub struct StateOwner {
     layout_engine_active: bool,
     drag_origin: Option<(ClusterId, f64, f64)>,
     keyboard_move_origin: Option<(ClusterId, f64, f64)>,
+    /// Long-lived `IpcRequest::Subscribe` clients. Each entry is the
+    /// writer half of the upgraded socket; we push
+    /// `IpcResponse::Event(StateChanged)` to all of them after every
+    /// `bump_revision` and prune any whose write failed (client closed).
+    /// W1c-25-7 — closes the seam where overlay only learned about
+    /// daemon-side mutations on its 1200 ms baseline poll.
+    event_subscribers: Vec<UnixStream>,
 }
 
 impl StateOwner {
@@ -168,6 +177,7 @@ impl StateOwner {
             layout_engine_active: false,
             drag_origin: None,
             keyboard_move_origin: None,
+            event_subscribers: Vec::new(),
         }
     }
 
@@ -1072,6 +1082,20 @@ impl StateOwner {
         let changed_viewport = previous.viewport != self.canvas_state.viewport;
         let changed_zoom = previous.zoom != self.canvas_state.zoom;
 
+        // Catch every zoom-level mutation in one place: stamp a fresh
+        // ZoomTransition so overlay (W1c-25-1) animates from the prior
+        // viewport/level to the new one rather than snapping. Cleared by
+        // `advance_transition_on_cluster_mapped` (vibewm signal) or
+        // `clear_stale_transition` (safety timeout from the daemon tick).
+        if changed_zoom {
+            self.canvas_state.transition = Some(common::contracts::ZoomTransition {
+                from: previous.zoom.clone(),
+                to: self.canvas_state.zoom.clone(),
+                phase: common::contracts::TransitionPhase::Started,
+                started_at_ms: now_unix_ms(),
+            });
+        }
+
         if changed_positions || changed_assignments || changed_zoom {
             if let Err(error) = self.persistence.persist_immediate(&self.canvas_state) {
                 tracing::warn!(?error, path=?self.persistence.path(), "failed to persist overview state immediately");
@@ -1089,6 +1113,60 @@ impl StateOwner {
         }
     }
 
+    /// Called by the daemon when vibewm reports `WmSignal::ClusterMapped`.
+    /// If the in-flight transition's destination is this cluster (or this
+    /// cluster's window in Focus mode), advance phase to `CompositorSettled`
+    /// — overlay's animation can finish without risk of mid-anim window
+    /// jumps. Mismatched clusters leave the transition alone.
+    pub fn advance_transition_on_cluster_mapped(&mut self, cluster: ClusterId) {
+        let Some(transition) = self.canvas_state.transition.as_mut() else {
+            return;
+        };
+        let target_cluster = match &transition.to {
+            ZoomLevel::Cluster(c) => Some(*c),
+            ZoomLevel::Focus(window_id) => self
+                .canvas_state
+                .clusters
+                .iter()
+                .find(|c| c.windows.contains(window_id))
+                .map(|c| c.id),
+            ZoomLevel::Overview => None,
+        };
+        if target_cluster == Some(cluster)
+            && transition.phase == common::contracts::TransitionPhase::Started
+        {
+            transition.phase = common::contracts::TransitionPhase::CompositorSettled;
+        }
+    }
+
+    /// Drop a stale transition that the compositor never confirmed (e.g.
+    /// vibewm crashed mid-flip, or the sway backend that never emits
+    /// ClusterMapped). Called from the daemon tick; safe to call every
+    /// tick — only acts if the transition is older than `max_age`.
+    pub fn clear_stale_transition(&mut self, max_age: Duration) {
+        let Some(transition) = self.canvas_state.transition.as_ref() else {
+            return;
+        };
+        let now = now_unix_ms();
+        if now.saturating_sub(transition.started_at_ms) >= max_age.as_millis() as u64 {
+            tracing::debug!(
+                age_ms = now.saturating_sub(transition.started_at_ms),
+                phase = ?transition.phase,
+                "state_store: clearing stale ZoomTransition"
+            );
+            self.canvas_state.transition = None;
+        }
+    }
+
+    /// Drop the transition immediately. Reserved for callers that want to
+    /// abort a transition (e.g. user hits Esc mid-dive). Currently unused
+    /// from production code but exposed because the W1c-25-1 overlay flow
+    /// will need it when the user cancels mid-animation.
+    #[allow(dead_code)]
+    pub fn clear_transition(&mut self) {
+        self.canvas_state.transition = None;
+    }
+
     fn bump_revision(&mut self, prior: u64, mutation: MutationType, conflict: ConflictOutcome) {
         self.canvas_state.state_revision = prior.saturating_add(1);
         let next = self.canvas_state.state_revision;
@@ -1102,6 +1180,40 @@ impl StateOwner {
             focus_freeze = ?self.focus_freeze,
             "deterministic mutation log"
         );
+        // W1c-25-7: push to subscribed clients (overlay) so they react
+        // within socket-RTT instead of waiting for their next poll. We
+        // skip GetState — it's a query, not a mutation, and broadcasting
+        // would create an infinite-poll storm with subscribed pollers.
+        if !matches!(mutation, MutationType::GetState) {
+            self.broadcast_state_changed();
+        }
+    }
+
+    /// Append a subscriber stream (the writer half of an upgraded
+    /// `IpcRequest::Subscribe` connection). Subsequent mutations push
+    /// `IpcResponse::Event(StateChanged)` lines to all listed streams.
+    pub fn register_event_subscriber(&mut self, stream: UnixStream) {
+        self.event_subscribers.push(stream);
+    }
+
+    /// Broadcast a `StateChanged` event to every subscriber, dropping any
+    /// whose write fails (client disconnected). Cheap when there are no
+    /// subscribers — the common case for daemons running without overlay.
+    fn broadcast_state_changed(&mut self) {
+        if self.event_subscribers.is_empty() {
+            return;
+        }
+        let line = match serde_json::to_string(&common::contracts::IpcResponse::Event(
+            common::contracts::DaemonEventKind::StateChanged,
+        )) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(?e, "broadcast: serialize event failed");
+                return;
+            }
+        };
+        self.event_subscribers
+            .retain_mut(|stream| writeln!(stream, "{line}").is_ok() && stream.flush().is_ok());
     }
 
     fn apply_assignment_hints(&mut self) {
@@ -1285,4 +1397,15 @@ fn exclusion_reason(window: &Window) -> Option<wm::layout::LayoutExclusionReason
         return Some(wm::layout::LayoutExclusionReason::ManualResize);
     }
     None
+}
+
+/// Wall-clock ms since UNIX epoch. Used to stamp `ZoomTransition.started_at_ms`.
+/// Saturates to 0 on a backwards-clock machine — a fresh transition arriving
+/// then would just look "very old" and overlay would skip animating, which is
+/// the conservative behavior.
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

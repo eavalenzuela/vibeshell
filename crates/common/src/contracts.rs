@@ -26,6 +26,14 @@ pub struct CanvasState {
     pub clusters: Vec<Cluster>,
     pub windows: Vec<Window>,
     pub output: OutputState,
+    /// In-flight zoom-level transition. Set by the daemon when zoom changes
+    /// (overlay's dive into a cluster, zoom-in/out-mode, etc.) and cleared
+    /// once the compositor finishes remapping the new layout (or after a
+    /// safety timeout). Overlay polls this to drive the W1c-25-1 dive/undive
+    /// animations and avoid showing a "snap" when the change came from a
+    /// background source. Transient — never persisted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transition: Option<ZoomTransition>,
 }
 
 impl CanvasState {
@@ -132,6 +140,36 @@ pub enum ZoomLevel {
     Cluster(ClusterId),
     /// Zoomed into a single window within its cluster.
     Focus(WindowId),
+}
+
+/// In-flight zoom-level transition. Set by the daemon when zoom changes;
+/// drives overlay's W1c-25-1 dive/undive animations and tells overlay
+/// whether to animate or snap. Phase advances on `WmSignal::ClusterMapped`
+/// (W1c-25-2) and clears either then or after a safety timeout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ZoomTransition {
+    pub from: ZoomLevel,
+    pub to: ZoomLevel,
+    pub phase: TransitionPhase,
+    /// Wall-clock ms since UNIX epoch when the transition started. Overlay
+    /// computes elapsed locally to decide whether to start the animation
+    /// from t=0 or skip in (e.g. on a stale poll observation).
+    pub started_at_ms: u64,
+}
+
+/// Transition lifecycle. `Started` is the initial state; `CompositorSettled`
+/// fires once vibewm reports `ClusterMapped`; the daemon clears the
+/// transition shortly after that (or on safety-timeout).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionPhase {
+    /// Daemon flipped zoom; overlay should start its zoom animation.
+    /// Compositor may or may not be remapping in parallel.
+    #[default]
+    Started,
+    /// Vibewm finished remapping for the new zoom level. Overlay can
+    /// finish its animation (no more mid-anim window-jump risk).
+    CompositorSettled,
 }
 
 /// Pan/zoom state for the overview canvas. `(x, y)` is the world-space point at
@@ -299,6 +337,25 @@ pub enum IpcRequest {
     /// Standalone apps reload via SIGHUP; this request routes through the
     /// daemon specifically.
     ReloadConfig,
+    /// Take over this connection as a long-lived event subscription. The
+    /// daemon replies once with `Subscribed`, then pushes
+    /// `IpcResponse::Event(...)` lines whenever state mutates. Same shape
+    /// as vibewm's `Subscribe`. Overlay uses this (W1c-25-7) to react to
+    /// daemon-side `ZoomTransition` stamps without waiting on its 1200 ms
+    /// baseline poll — closes the seam where Cluster→Overview transitions
+    /// don't fire `WmSignal::ClusterMapped` (because `apply_focus_handoff`
+    /// short-circuits for `ZoomLevel::Overview`) and so overlay would
+    /// otherwise miss the undive trigger entirely.
+    Subscribe,
+}
+
+/// Events the daemon pushes to subscribed clients on every state mutation.
+/// Coarse-grained for now — clients re-fetch via `GetState` in response.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DaemonEventKind {
+    /// Any `CanvasState` mutation. Re-snapshot to learn what changed.
+    StateChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -316,6 +373,13 @@ pub enum CycleDirection {
 }
 
 /// All daemon→client responses.
+//
+// `State` dominates the size by ~10×; clippy's `large_enum_variant` lint
+// suggests boxing it. We allow the lint instead because every `GetState`
+// response carries this variant — boxing adds an indirect access on the
+// hot path for a savings only realized on `Ack`/`Error` (rare branches).
+// JSON serialization shape is unchanged either way.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcResponse {
@@ -326,6 +390,11 @@ pub enum IpcResponse {
     /// Mutation failed; `message` is a human-readable reason. Some errors are
     /// structured JSON (see `state_store.rs` handlers).
     Error { message: String },
+    /// Subscribe request acknowledged; subsequent reads on this connection
+    /// yield `Event(...)` lines until the connection closes.
+    Subscribed,
+    /// State mutation happened. Subscribers re-fetch via `GetState`.
+    Event(DaemonEventKind),
 }
 
 /// Path to the daemon's Unix socket. Defaults to
@@ -409,6 +478,7 @@ mod tests {
                 manual_position_override: false,
             }],
             output: OutputState::default(),
+            transition: None,
         };
 
         let json = serde_json::to_string_pretty(&fixture).expect("serialize fixture");
@@ -545,6 +615,7 @@ mod tests {
                     .map(|window_id| fixture_window(*window_id, cluster_id))
                     .collect(),
                 output: OutputState::default(),
+                transition: None,
             };
 
             for _ in 0..20 {
@@ -556,5 +627,29 @@ mod tests {
             assert_eq!(state.clusters[0].recency, window_ids);
             assert_eq!(state.zoom, ZoomLevel::Cluster(cluster_id));
         }
+    }
+
+    #[test]
+    fn subscribe_request_round_trips() {
+        let req = IpcRequest::Subscribe;
+        let s = serde_json::to_string(&req).expect("serialize");
+        let back: IpcRequest = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn event_response_round_trips() {
+        let resp = IpcResponse::Event(DaemonEventKind::StateChanged);
+        let s = serde_json::to_string(&resp).expect("serialize");
+        let back: IpcResponse = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn subscribed_response_serializes_with_expected_tag() {
+        // Lock the wire shape so overlay can grep raw lines without
+        // pulling in the full IpcResponse decoder if it ever wants to.
+        let s = serde_json::to_string(&IpcResponse::Subscribed).expect("serialize");
+        assert_eq!(s, r#"{"type":"subscribed"}"#);
     }
 }

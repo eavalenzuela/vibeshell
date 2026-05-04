@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 config = { path = "../../crates/config" }
 common = { path = "../../crates/common" }
+gtk-theme = { path = "../../crates/gtk-theme" }
 tracing.workspace = true
 gtk4 = "0.8"
 gtk4-layer-shell = "0.3"

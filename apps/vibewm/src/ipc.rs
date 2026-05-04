@@ -134,6 +134,7 @@ fn dispatch_request(
             if state.model.activate_cluster(cluster) {
                 state.sync_cluster_visibility();
                 state.broadcast_workspace_or_window();
+                state.broadcast_cluster_mapped(cluster);
                 Some(VibewmResponse::Ack)
             } else {
                 Some(VibewmResponse::Error {
@@ -153,6 +154,9 @@ fn dispatch_request(
                 state.sync_cluster_visibility();
             }
             state.broadcast_workspace_or_window();
+            if switched {
+                state.broadcast_cluster_mapped(id);
+            }
             tracing::info!(
                 name,
                 cluster_id = id,
@@ -164,6 +168,8 @@ fn dispatch_request(
             if state.model.back_and_forth() {
                 state.sync_cluster_visibility();
                 state.broadcast_workspace_or_window();
+                let active = state.model.active_cluster;
+                state.broadcast_cluster_mapped(active);
             }
             Some(VibewmResponse::Ack)
         }
@@ -335,17 +341,41 @@ impl Vibewm {
     }
 
     /// Apply a batch of `LayoutOp`s by repositioning + resizing the
-    /// corresponding smithay windows. Returns the number of ops successfully
-    /// dispatched (skips ops whose window id isn't registered).
+    /// corresponding smithay windows. Position changes are *animated*
+    /// (W1c-25-4) via the `window_anims` map; the render loop's
+    /// `tick_window_anims` call interpolates between frames. Size changes
+    /// fire immediately as xdg_toplevel configures — animating those
+    /// would fight the client's redraw cadence and produce flicker.
+    /// Returns the number of ops successfully dispatched (skips ops whose
+    /// window id isn't registered).
     pub fn apply_layout_ops(&mut self, ops: &[LayoutOp]) -> usize {
+        let now = std::time::Instant::now();
         let mut applied = 0;
         for op in ops {
             let Some(window) = self.model.windows.get(&op.window_id).cloned() else {
                 continue;
             };
-            // Position via Space::map_element (idempotent re-map).
-            self.space
-                .map_element(window.clone(), (op.target.x, op.target.y), false);
+            // Capture current position from the space; fall back to the
+            // last-known cache for windows that aren't yet mapped (first
+            // map after a fresh new_toplevel).
+            let current = self
+                .space
+                .element_location(&window)
+                .map(|loc| (loc.x, loc.y))
+                .or_else(|| self.last_known_position.get(&op.window_id).copied())
+                .unwrap_or((op.target.x, op.target.y));
+            crate::anim::stage(
+                &mut self.window_anims,
+                op.window_id,
+                current,
+                (op.target.x, op.target.y),
+                now,
+                crate::anim::DEFAULT_DURATION,
+            );
+            // Stamp the target as the canonical "last known" so cluster
+            // switches restore at the *destination*, not whatever
+            // mid-anim position they happened to be at when an unmap
+            // races with a layout change.
             self.last_known_position
                 .insert(op.window_id, (op.target.x, op.target.y));
             // Size via xdg_toplevel configure — client redraws at new size on
@@ -359,6 +389,45 @@ impl Vibewm {
             applied += 1;
         }
         applied
+    }
+
+    /// Drive the in-flight position animations one frame. Called by the
+    /// udev render loop. Returns true while at least one animation is
+    /// still in progress, so the caller can schedule another render to
+    /// continue the animation; false when the map is empty (and the
+    /// caller can skip the extra render kick).
+    ///
+    /// Under the default `winit` backend (no `udev` feature) nothing
+    /// drives this — winit windows don't have the same dive→tile
+    /// transition; the dev-mode visual is "good enough" without it.
+    #[cfg_attr(not(feature = "udev"), allow(dead_code))]
+    pub fn tick_window_anims(&mut self, now: std::time::Instant) -> bool {
+        if self.window_anims.is_empty() {
+            return false;
+        }
+        let mut completed: Vec<WindowId> = Vec::new();
+        // Snapshot the (window, sample) pairs so we can release the
+        // borrow on `window_anims` before mutating `space`.
+        let samples: Vec<(WindowId, (i32, i32), bool)> = self
+            .window_anims
+            .iter()
+            .map(|(id, anim)| {
+                let (pos, done) = anim.sample(now);
+                (*id, pos, done)
+            })
+            .collect();
+        for (id, pos, done) in samples {
+            if let Some(window) = self.model.windows.get(&id).cloned() {
+                self.space.map_element(window, pos, false);
+            }
+            if done {
+                completed.push(id);
+            }
+        }
+        for id in completed {
+            self.window_anims.remove(&id);
+        }
+        !self.window_anims.is_empty()
     }
 
     /// After a cluster activation, walk the model and ensure exactly the
@@ -401,8 +470,28 @@ impl Vibewm {
     /// meaningfully — new toplevel, focus change, cluster activation,
     /// toplevel destroyed.
     pub fn broadcast_workspace_or_window(&mut self) {
-        let event = VibewmResponse::Event(VibewmEvent::WorkspaceOrWindow);
-        let line = match serde_json::to_string(&event) {
+        self.broadcast_event(VibewmEvent::WorkspaceOrWindow);
+    }
+
+    /// Push a `ClusterMapped` event after vibewm finishes (re)mapping a
+    /// cluster's windows in `sync_cluster_visibility`. The daemon uses this
+    /// to advance its `ZoomTransition` past CompositorRemapping (W1c-25-3+).
+    pub fn broadcast_cluster_mapped(&mut self, cluster: common::contracts::ClusterId) {
+        let window_count = self
+            .model
+            .clusters
+            .iter()
+            .find(|c| c.id == cluster)
+            .map(|c| c.windows.len() as u32)
+            .unwrap_or(0);
+        self.broadcast_event(VibewmEvent::ClusterMapped {
+            cluster,
+            window_count,
+        });
+    }
+
+    fn broadcast_event(&mut self, event: VibewmEvent) {
+        let line = match serde_json::to_string(&VibewmResponse::Event(event)) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(?e, "broadcast: serialize event failed");

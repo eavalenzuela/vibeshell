@@ -70,6 +70,9 @@ fn main() {
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| {
+        if let Some(display) = gtk4::gdk::Display::default() {
+            gtk_theme::install_theme(&display);
+        }
         build_ui(app, bindings.clone());
     });
     app.run();
@@ -170,6 +173,7 @@ fn build_ui(app: &adw::Application, bindings: Vec<Binding>) {
         .default_width(520)
         .default_height(620)
         .build();
+    window.add_css_class("vibeshell-cheatsheet-window");
 
     // Prefer layer-shell overlay so it sits above everything; fall back to a
     // regular floating window if the compositor doesn't support layer-shell.
@@ -191,15 +195,18 @@ fn build_ui(app: &adw::Application, bindings: Vec<Binding>) {
         .margin_start(20)
         .margin_end(20)
         .build();
+    root.add_css_class("vibeshell-cheatsheet-panel");
 
     let title = gtk::Label::new(Some("Keyboard shortcuts"));
     title.add_css_class("title-2");
+    title.add_css_class("vibeshell-cheatsheet-title");
     title.set_halign(gtk::Align::Start);
     root.append(&title);
 
     let hint = gtk::Label::new(Some("Esc to close"));
     hint.add_css_class("dim-label");
     hint.add_css_class("caption");
+    hint.add_css_class("vibeshell-cheatsheet-hint");
     hint.set_halign(gtk::Align::Start);
     root.append(&hint);
 
@@ -256,6 +263,7 @@ fn render_bindings(list: &gtk::Box, bindings: &[Binding]) {
             current_category = Some(binding.category);
             let header = gtk::Label::new(Some(binding.category.label()));
             header.add_css_class("heading");
+            header.add_css_class("vibeshell-cheatsheet-section-header");
             header.set_halign(gtk::Align::Start);
             header.set_margin_top(12);
             list.append(&header);
@@ -265,13 +273,16 @@ fn render_bindings(list: &gtk::Box, bindings: &[Binding]) {
             .orientation(gtk::Orientation::Horizontal)
             .spacing(12)
             .build();
+        row.add_css_class("vibeshell-cheatsheet-row");
 
         let key_label = gtk::Label::new(Some(&humanize_key(&binding.key)));
         key_label.add_css_class("monospace");
+        key_label.add_css_class("vibeshell-cheatsheet-key");
         key_label.set_xalign(0.0);
         key_label.set_width_chars(24);
 
         let desc_label = gtk::Label::new(Some(&describe_command(&binding.command)));
+        desc_label.add_css_class("vibeshell-cheatsheet-desc");
         desc_label.set_xalign(0.0);
         desc_label.set_hexpand(true);
         desc_label.set_wrap(true);

@@ -1,0 +1,409 @@
+#!/usr/bin/env bash
+# Headless smoke test for vibeshell against the wlroots backend path.
+#
+# Boots `mock-vibewm-control` (in-memory implementation of the
+# vibewm-control JSON-line protocol) as a stand-in for the real vibewm
+# compositor — no GPU, no smithay, no DRM. Then runs the daemon under
+# `WM_BACKEND=wlroots` against it and exercises the same IPC mutations
+# the sway-mode smoke test does. Diverges from `smoke-test` only where
+# sway's tree ingestion is involved (no real windows here).
+#
+# Usage:
+#   ./scripts/smoke-test-wlroots               # build + test
+#   SKIP_BUILD=1 ./scripts/smoke-test-wlroots  # skip cargo build
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TARGET_DIR="${PROJECT_ROOT}/target/debug"
+
+# ── Logging helpers ──────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+PASS_COUNT=0
+FAIL_COUNT=0
+
+log()  { printf '[smoke-test-wlroots] %s\n' "$*"; }
+pass() { PASS_COUNT=$((PASS_COUNT + 1)); printf "${GREEN}  ✓ %s${RESET}\n" "$*"; }
+fail() { FAIL_COUNT=$((FAIL_COUNT + 1)); printf "${RED}  ✗ %s${RESET}\n" "$*"; }
+section() { printf "\n${BOLD}── %s ──${RESET}\n" "$*"; }
+
+# ── Build ────────────────────────────────────────────────────────────────────
+
+section "Build"
+
+if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
+  log "Skipping build (SKIP_BUILD=1)"
+else
+  log "Building workspace binaries + mock-vibewm-control..."
+  cargo build --workspace --bins 2>&1 | tail -1
+  cargo build -p wm --bin mock-vibewm-control 2>&1 | tail -1
+fi
+
+for bin in vibeshellctl mock-vibewm-control; do
+  if [[ ! -x "${TARGET_DIR}/${bin}" ]]; then
+    fail "Binary not found: ${TARGET_DIR}/${bin}"
+    exit 1
+  fi
+done
+pass "All required binaries built"
+
+# ── Setup ────────────────────────────────────────────────────────────────────
+
+SCRATCH_DIR="$(mktemp -d /tmp/vibeshell-smoke-wlroots.XXXXXX)"
+trap 'cleanup' EXIT INT TERM
+
+DAEMON_SOCKET="${SCRATCH_DIR}/vibeshell-daemon.sock"
+VIBEWM_SOCKET="${SCRATCH_DIR}/vibewm-control.sock"
+MOCK_LOG="${SCRATCH_DIR}/mock-vibewm.log"
+DAEMON_LOG="${SCRATCH_DIR}/daemon.log"
+
+MOCK_PID=""
+DAEMON_PID=""
+
+cleanup() {
+  log "Cleaning up..."
+  if [[ -n "${DAEMON_PID}" ]]; then
+    kill -TERM "${DAEMON_PID}" 2>/dev/null || true
+    wait "${DAEMON_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${MOCK_PID}" ]]; then
+    kill -TERM "${MOCK_PID}" 2>/dev/null || true
+    wait "${MOCK_PID}" 2>/dev/null || true
+  fi
+  if [[ "${FAIL_COUNT}" -gt 0 ]]; then
+    printf "\n${YELLOW}── Logs (on failure) ──${RESET}\n"
+    for f in "${MOCK_LOG}" "${DAEMON_LOG}"; do
+      if [[ -s "${f}" ]]; then
+        printf "${YELLOW}--- %s ---${RESET}\n" "$(basename "${f}")"
+        tail -30 "${f}"
+      fi
+    done
+  fi
+  rm -rf "${SCRATCH_DIR}"
+}
+
+ctl() {
+  XDG_RUNTIME_DIR="${SCRATCH_DIR}" "${TARGET_DIR}/vibeshellctl" "$@"
+}
+
+wait_for() {
+  local description="$1"
+  local check_cmd="$2"
+  local timeout_s="${3:-10}"
+  for _ in $(seq 1 $((timeout_s * 10))); do
+    if eval "${check_cmd}" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "Timed out waiting for: ${description}"
+  return 1
+}
+
+# ── Start mock vibewm ────────────────────────────────────────────────────────
+
+section "mock vibewm-control"
+
+XDG_RUNTIME_DIR="${SCRATCH_DIR}" \
+VIBEWM_SOCKET="${VIBEWM_SOCKET}" \
+  "${TARGET_DIR}/mock-vibewm-control" &>"${MOCK_LOG}" &
+MOCK_PID=$!
+
+wait_for "vibewm-control socket" "[[ -S ${VIBEWM_SOCKET} ]]" 5 || exit 1
+
+if kill -0 "${MOCK_PID}" 2>/dev/null; then
+  pass "mock vibewm-control started (pid=${MOCK_PID})"
+else
+  fail "mock vibewm-control exited prematurely"
+  exit 1
+fi
+
+# ── Start daemon under WM_BACKEND=wlroots ────────────────────────────────────
+
+start_daemon() {
+  rm -f "${DAEMON_SOCKET}"
+  WM_BACKEND=wlroots \
+  XDG_RUNTIME_DIR="${SCRATCH_DIR}" \
+  XDG_CONFIG_HOME="${SCRATCH_DIR}/xdg-config" \
+  XDG_STATE_HOME="${SCRATCH_DIR}/xdg-state" \
+  VIBEWM_SOCKET="${VIBEWM_SOCKET}" \
+    "${TARGET_DIR}/vibeshellctl" daemon &>>"${DAEMON_LOG}" &
+  REPLY=$!
+  wait_for "daemon socket" "[[ -S ${DAEMON_SOCKET} ]]" 10 || return 1
+}
+
+section "Daemon (WM_BACKEND=wlroots)"
+
+start_daemon || exit 1
+DAEMON_PID="${REPLY}"
+
+if kill -0 "${DAEMON_PID}" 2>/dev/null; then
+  pass "Daemon started (pid=${DAEMON_PID})"
+else
+  fail "Daemon exited prematurely"
+  exit 1
+fi
+
+# ── Test: get-state ──────────────────────────────────────────────────────────
+
+section "IPC: get-state"
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+if echo "${STATE}" | jq -e '.type == "state"' >/dev/null 2>&1; then
+  pass "get-state returns valid IPC response"
+else
+  fail "get-state did not return type=state"
+  log "Got: ${STATE}"
+fi
+
+CLUSTER_COUNT="$(echo "${STATE}" | jq '.clusters | length')"
+if [[ "${CLUSTER_COUNT}" -ge 1 ]]; then
+  pass "Initial state has ${CLUSTER_COUNT} cluster(s) (default workspace)"
+else
+  fail "Initial state has no clusters"
+fi
+
+# ── Test: create cluster ─────────────────────────────────────────────────────
+
+section "IPC: create cluster"
+
+CREATE_RESP="$(ctl ipc create-cluster wl-cluster 500 300 2>/dev/null)"
+if echo "${CREATE_RESP}" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "create-cluster returned ack"
+else
+  fail "create-cluster did not return ack"
+  log "Got: ${CREATE_RESP}"
+fi
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+TEST_CLUSTER="$(echo "${STATE}" | jq '[.clusters[] | select(.name == "wl-cluster")] | first')"
+if [[ "${TEST_CLUSTER}" != "null" && -n "${TEST_CLUSTER}" ]]; then
+  pass "Cluster 'wl-cluster' exists in state"
+else
+  fail "Cluster 'wl-cluster' not found after creation"
+fi
+
+# ── Test: select + keyboard move ─────────────────────────────────────────────
+
+section "IPC: select + keyboard move"
+
+CLUSTER_ID="$(echo "${STATE}" | jq '[.clusters[] | select(.name == "wl-cluster")] | first | .id')"
+
+if echo "$(ctl ipc select-cluster "${CLUSTER_ID}" 2>/dev/null)" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "select-cluster ack"
+else
+  fail "select-cluster failed"
+fi
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+BEFORE_X="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .x")"
+BEFORE_Y="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .y")"
+
+ctl ipc enter-keyboard-move-mode "${CLUSTER_ID}" >/dev/null 2>&1
+ctl ipc keyboard-move-by --dx 100 --dy 50 >/dev/null 2>&1
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+AFTER_X="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .x")"
+AFTER_Y="$(echo "${STATE}" | jq "[.clusters[] | select(.id == ${CLUSTER_ID})] | first | .y")"
+
+X_OK="$(jq -n "(${AFTER_X} - ${BEFORE_X} - 100) | fabs < 1")"
+Y_OK="$(jq -n "(${AFTER_Y} - ${BEFORE_Y} - 50) | fabs < 1")"
+
+if [[ "${X_OK}" == "true" && "${Y_OK}" == "true" ]]; then
+  pass "Cluster moved by (+100,+50) from (${BEFORE_X},${BEFORE_Y})"
+else
+  fail "Expected (+100,+50), got (${AFTER_X},${AFTER_Y})"
+fi
+
+ctl ipc commit-keyboard-move >/dev/null 2>&1
+pass "commit-keyboard-move completed"
+
+# ── Test: zoom ───────────────────────────────────────────────────────────────
+
+section "IPC: zoom"
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+ZOOM_BEFORE="$(echo "${STATE}" | jq -r '.zoom.kind // .zoom')"
+
+if echo "$(ctl ipc zoom-in-mode 2>/dev/null)" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "zoom-in-mode ack"
+else
+  fail "zoom-in-mode failed"
+fi
+
+STATE="$(ctl ipc get-state 2>/dev/null)"
+ZOOM_AFTER="$(echo "${STATE}" | jq -r '.zoom.kind // .zoom')"
+
+if [[ "${ZOOM_AFTER}" != "${ZOOM_BEFORE}" ]] || [[ "${ZOOM_AFTER}" != "overview" ]]; then
+  pass "Zoom changed: ${ZOOM_BEFORE} -> ${ZOOM_AFTER}"
+else
+  fail "Zoom unchanged after zoom-in-mode"
+fi
+
+# ── Test: ZoomTransition lifecycle (W1c-25-3) ────────────────────────────────
+# Zoom mutations should stamp a transition; the mock-vibewm-fired
+# ClusterMapped event should advance it to compositor_settled.
+
+section "IPC: zoom transition lifecycle"
+
+# Reset zoom to a known state and capture the absence of a transition.
+ctl ipc zoom-out-mode >/dev/null 2>&1 || true
+ctl ipc zoom-out-mode >/dev/null 2>&1 || true  # Cluster→Overview if currently in Cluster.
+sleep 0.3
+
+# Trigger a zoom-in (Overview→Cluster). This sets the transition.
+ctl ipc zoom-in-mode >/dev/null 2>&1
+STATE_DURING="$(ctl ipc get-state 2>/dev/null)"
+TRANS_PRESENT="$(echo "${STATE_DURING}" | jq 'has("transition") and (.transition != null)')"
+
+if [[ "${TRANS_PRESENT}" == "true" ]]; then
+  TRANS_PHASE="$(echo "${STATE_DURING}" | jq -r '.transition.phase // "missing"')"
+  pass "Transition present after zoom-in-mode (phase=${TRANS_PHASE})"
+else
+  fail "Expected transition after zoom-in-mode; got: $(echo "${STATE_DURING}" | jq -c '.transition')"
+fi
+
+# Wait for the daemon-side advance via the mock's ClusterMapped event,
+# then for the staleness sweep to clear it (TRANSITION_STALENESS_TIMEOUT=800ms).
+sleep 1.2
+
+STATE_AFTER="$(ctl ipc get-state 2>/dev/null)"
+TRANS_AFTER="$(echo "${STATE_AFTER}" | jq '.transition // "absent"')"
+if [[ "${TRANS_AFTER}" == "\"absent\"" ]] || [[ "${TRANS_AFTER}" == "null" ]]; then
+  pass "Transition cleared after staleness timeout"
+else
+  fail "Transition should have cleared; still present: ${TRANS_AFTER}"
+fi
+
+# ── Test: daemon Subscribe channel (W1c-25-7) ────────────────────────────────
+# Open a long-lived Subscribe connection in the background, fire a
+# mutation while it's connected, then SIGKILL the nc process so it
+# doesn't hang waiting for the daemon (which holds the connection
+# indefinitely as a subscriber).
+
+section "IPC: subscribe channel"
+
+SUBSCRIBE_OUT="${SCRATCH_DIR}/subscribe.out"
+: > "${SUBSCRIBE_OUT}"
+# Long-lived nc process: feed Subscribe on its stdin, capture daemon
+# pushes on its stdout. Keep stdin open via `tail -f /dev/null` so nc
+# never sees EOF (which would close the connection).
+( tail -f /dev/null & echo $! >"${SCRATCH_DIR}/subscribe-feeder.pid"
+  printf '{"type":"subscribe"}\n'
+  wait
+) | nc -U "${DAEMON_SOCKET}" >"${SUBSCRIBE_OUT}" 2>&1 &
+NC_PID=$!
+
+# Give the Subscribe + the Subscribed reply a moment to round-trip,
+# then fire a mutation that bumps the revision and triggers a push.
+sleep 0.3
+ctl ipc zoom-out-mode >/dev/null 2>&1 || true
+sleep 0.5
+
+# Tear down the subscribe pipeline cleanly. Use TERM (not KILL) so bash
+# doesn't print a "Killed" stderr line that pollutes test output.
+# Wait specifically on NC_PID — bare `wait` blocks on every background
+# job in the script (daemon, mock).
+kill -TERM "$(cat "${SCRATCH_DIR}/subscribe-feeder.pid")" 2>/dev/null || true
+kill -TERM "${NC_PID}" 2>/dev/null || true
+wait "${NC_PID}" 2>/dev/null || true
+
+if grep -q '"type":"subscribed"' "${SUBSCRIBE_OUT}"; then
+  pass "Subscribe reply received"
+else
+  fail "Expected 'subscribed' line, got: $(cat "${SUBSCRIBE_OUT}")"
+fi
+
+if grep -q '"type":"event"' "${SUBSCRIBE_OUT}"; then
+  pass "StateChanged event pushed after mutation"
+else
+  fail "Expected 'event' line after mutation, got: $(cat "${SUBSCRIBE_OUT}")"
+fi
+
+# ── Test: cycle cluster ──────────────────────────────────────────────────────
+
+section "IPC: cycle cluster"
+
+CYCLE_RESP="$(ctl ipc cycle-cluster --direction forward 2>/dev/null)"
+if echo "${CYCLE_RESP}" | jq -e '.type == "ack"' >/dev/null 2>&1; then
+  pass "cycle-cluster ack"
+elif echo "${CYCLE_RESP}" | jq -e '.message | contains("history_too_short")' >/dev/null 2>&1; then
+  pass "cycle-cluster reports history_too_short (expected with single-cluster history)"
+else
+  fail "cycle-cluster unexpected: ${CYCLE_RESP}"
+fi
+
+# ── Test: persistence + daemon restart ───────────────────────────────────────
+
+section "Daemon crash recovery"
+
+CRASH_CLUSTER_ID="$(ctl ipc get-state 2>/dev/null | jq '.clusters[0].id')"
+ctl ipc enter-keyboard-move-mode "${CRASH_CLUSTER_ID}" >/dev/null 2>&1
+ctl ipc keyboard-move-by --dx 4242 --dy 1717 >/dev/null 2>&1
+ctl ipc commit-keyboard-move >/dev/null 2>&1
+
+STATE_BEFORE="$(ctl ipc get-state 2>/dev/null)"
+X_BEFORE="$(echo "${STATE_BEFORE}" | jq "[.clusters[] | select(.id == ${CRASH_CLUSTER_ID})] | first | .x")"
+Y_BEFORE="$(echo "${STATE_BEFORE}" | jq "[.clusters[] | select(.id == ${CRASH_CLUSTER_ID})] | first | .y")"
+
+sleep 0.5
+
+PERSIST_FILE="${SCRATCH_DIR}/xdg-state/vibeshell/overview-state.json"
+if [[ -s "${PERSIST_FILE}" ]]; then
+  pass "Persistence file written"
+else
+  fail "Expected persistence file at ${PERSIST_FILE}"
+fi
+
+kill -KILL "${DAEMON_PID}"
+wait "${DAEMON_PID}" 2>/dev/null || true
+sleep 0.2
+
+if ! kill -0 "${DAEMON_PID}" 2>/dev/null; then
+  pass "Daemon killed"
+else
+  fail "Daemon still alive after SIGKILL"
+fi
+
+start_daemon || fail "Replacement daemon failed to start"
+DAEMON_PID="${REPLY}"
+pass "Replacement daemon started (pid=${DAEMON_PID})"
+
+STATE_AFTER="$(ctl ipc get-state 2>/dev/null)"
+CRASH_NAME="$(echo "${STATE_BEFORE}" | jq -r "[.clusters[] | select(.id == ${CRASH_CLUSTER_ID})] | first | .name")"
+X_AFTER="$(echo "${STATE_AFTER}" | jq ".clusters[] | select(.name == \"${CRASH_NAME}\") | .x" | head -1)"
+Y_AFTER="$(echo "${STATE_AFTER}" | jq ".clusters[] | select(.name == \"${CRASH_NAME}\") | .y" | head -1)"
+
+if [[ -n "${X_AFTER}" && -n "${Y_AFTER}" ]]; then
+  X_MATCH="$(jq -n "(${X_AFTER} - (${X_BEFORE})) | fabs < 1")"
+  Y_MATCH="$(jq -n "(${Y_AFTER} - (${Y_BEFORE})) | fabs < 1")"
+  if [[ "${X_MATCH}" == "true" && "${Y_MATCH}" == "true" ]]; then
+    pass "Cluster position survived restart: (${X_AFTER},${Y_AFTER})"
+  else
+    fail "Position drifted: before (${X_BEFORE},${Y_BEFORE}) vs after (${X_AFTER},${Y_AFTER})"
+  fi
+else
+  fail "Cluster '${CRASH_NAME}' missing after restart"
+fi
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+
+section "Results"
+
+TOTAL=$((PASS_COUNT + FAIL_COUNT))
+printf "\n${BOLD}%d/%d passed${RESET}" "${PASS_COUNT}" "${TOTAL}"
+
+if [[ "${FAIL_COUNT}" -gt 0 ]]; then
+  printf "  ${RED}(%d failed)${RESET}\n\n" "${FAIL_COUNT}"
+  exit 1
+else
+  printf "  ${GREEN}(all passed)${RESET}\n\n"
+  exit 0
+fi

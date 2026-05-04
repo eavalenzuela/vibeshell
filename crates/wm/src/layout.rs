@@ -523,6 +523,7 @@ impl FramePipeline {
         now: Instant,
         clusters: &[ClusterLayoutInput],
         current_geometry: &HashMap<WindowId, Rect>,
+        context: LayoutComputeContext,
     ) -> Option<FrameResult> {
         let queued_at = self.last_queued_at?;
         if now.duration_since(queued_at) < self.debounce_window {
@@ -539,9 +540,7 @@ impl FramePipeline {
             .cloned()
             .collect();
 
-        let computed_targets = self
-            .layout_engine
-            .compute(&affected, LayoutComputeContext::default());
+        let computed_targets = self.layout_engine.compute(&affected, context);
         tracing::info!(
             stage = "computed_windows",
             computed_windows = computed_targets.len(),
@@ -626,11 +625,21 @@ mod tests {
         ]);
 
         assert!(pipeline
-            .try_build_frame(start + Duration::from_millis(8), &clusters, &current)
+            .try_build_frame(
+                start + Duration::from_millis(8),
+                &clusters,
+                &current,
+                LayoutComputeContext::default()
+            )
             .is_none());
 
         let frame = pipeline
-            .try_build_frame(start + Duration::from_millis(24), &clusters, &current)
+            .try_build_frame(
+                start + Duration::from_millis(24),
+                &clusters,
+                &current,
+                LayoutComputeContext::default(),
+            )
             .expect("frame should be emitted once debounce window elapsed");
 
         assert_eq!(frame.drained_events.len(), 2);
@@ -643,7 +652,12 @@ mod tests {
             .contains("[con_id=42]"));
 
         assert!(pipeline
-            .try_build_frame(start + Duration::from_millis(40), &clusters, &current)
+            .try_build_frame(
+                start + Duration::from_millis(40),
+                &clusters,
+                &current,
+                LayoutComputeContext::default()
+            )
             .is_none());
     }
 
@@ -823,6 +837,58 @@ mod tests {
         assert!(computed.contains_key(&33));
         assert!(!computed.contains_key(&32));
         assert!(!computed.contains_key(&34));
+    }
+
+    #[test]
+    fn try_build_frame_propagates_focus_context() {
+        // Regression: pre-W1c-25-6, `try_build_frame` always passed
+        // `LayoutComputeContext::default()` (Cluster mode), so no matter
+        // what the daemon computed in `layout_context()`, Focus-mode
+        // dominant-vs-strip layouts never fired. This test pins the fix:
+        // a Focus context produces dominant + strip widths, not equal-tile.
+        let mut pipeline = FramePipeline::new(
+            Duration::from_millis(8),
+            DiffThresholds {
+                position_px: 1,
+                size_px: 1,
+            },
+        );
+        let cluster = ClusterLayoutInput {
+            cluster_id: 99,
+            area: Rect {
+                x: 0,
+                y: 0,
+                width: 1000,
+                height: 600,
+            },
+            windows: vec![100, 101, 102],
+            first_seen_at: HashMap::from([(100, 1), (101, 2), (102, 3)]),
+            excluded_windows: HashMap::new(),
+        };
+        let start = Instant::now();
+        pipeline.queue_event(BackendEvent::WorkspaceChanged { cluster_id: 99 }, start);
+        let frame = pipeline
+            .try_build_frame(
+                start + Duration::from_millis(24),
+                std::slice::from_ref(&cluster),
+                &HashMap::new(),
+                LayoutComputeContext {
+                    mode: LayoutMode::Focus,
+                    focused_window_id: Some(101),
+                    focus_ratio: 0.75,
+                },
+            )
+            .expect("frame should fire after debounce");
+        assert_eq!(
+            frame.computed_targets.get(&101).expect("focused").width,
+            750,
+            "Focus mode should give 75% width to the dominant window"
+        );
+        assert_eq!(
+            frame.computed_targets.get(&100).expect("strip").width,
+            125,
+            "Focus mode strip windows should split the remaining 25%"
+        );
     }
 
     #[test]

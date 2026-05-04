@@ -28,7 +28,18 @@ pub enum BackendError {
 /// "something changed, re-ingest" pulse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WmSignal {
+    /// Generic "something changed, re-ingest" pulse.
     WorkspaceOrWindow,
+    /// A cluster's windows finished (re)mapping after an activation. The
+    /// daemon uses this to mark a `ZoomTransition` as ready to leave the
+    /// CompositorRemapping phase. `window_count` is informational only —
+    /// daemons that want the actual window list re-snapshot in response.
+    /// (Sway backend doesn't currently emit this; only the wlroots/vibewm
+    /// path does today.)
+    ClusterMapped {
+        cluster: ClusterId,
+        window_count: u32,
+    },
 }
 
 /// Tree-of-windows + workspace + output snapshot, plus the few imperative

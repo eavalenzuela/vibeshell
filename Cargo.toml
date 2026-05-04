@@ -9,6 +9,7 @@ members = [
   "apps/vibewm",
   "crates/common",
   "crates/config",
+  "crates/gtk-theme",
   "crates/sway",
   "crates/wm",
   "crates/xdg",

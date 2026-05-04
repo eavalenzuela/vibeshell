@@ -482,6 +482,7 @@ name = "cheatsheet"
 version = "0.1.0"
 dependencies = [
  "common",
+ "gtk-theme",
  "gtk4",
  "gtk4-layer-shell",
  "libadwaita",
@@ -1241,6 +1242,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gtk-theme"
+version = "0.1.0"
+dependencies = [
+ "gtk4",
+ "tracing",
+]
+
+[[package]]
 name = "gtk4"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1532,6 +1541,7 @@ version = "0.1.0"
 dependencies = [
  "common",
  "config",
+ "gtk-theme",
  "gtk4",
  "gtk4-layer-shell",
  "libadwaita",
@@ -1750,6 +1760,7 @@ version = "0.1.0"
 dependencies = [
  "common",
  "config",
+ "gtk-theme",
  "gtk4",
  "gtk4-layer-shell",
  "tracing",
@@ -2037,6 +2048,7 @@ name = "overlay"
 version = "0.1.0"
 dependencies = [
  "common",
+ "gtk-theme",
  "gtk4",
  "gtk4-layer-shell",
  "libadwaita",
@@ -2053,6 +2065,7 @@ dependencies = [
  "chrono",
  "common",
  "config",
+ "gtk-theme",
  "gtk4",
  "gtk4-layer-shell",
  "libadwaita",
@@ -3014,6 +3027,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wm",
+ "xcursor",
 ]
 
 [[package]]

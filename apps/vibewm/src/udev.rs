@@ -12,8 +12,8 @@
 //!
 //! Minimum-viable scope: single GPU, single output, no hot-plug, no DRM
 //! lease, no dmabuf protocol, no multi-GPU. We pick the lowest-common-denom
-//! pixel format (Argb8888) and let the renderer handle scaling. Cursor is
-//! not drawn yet (pointer events still fire; visual cursor is W1c-DRM-2).
+//! pixel format (Argb8888) and let the renderer handle scaling. Cursor
+//! rendering lives in `crate::cursor` (xcursor theme + client-set surfaces).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -27,18 +27,21 @@ use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, DrmNode};
 use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
+use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
+use smithay::backend::renderer::element::render_elements;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
-use smithay::backend::renderer::element::{render_elements, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::Color32F;
-use smithay::desktop::space::SpaceRenderElements;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{UdevBackend, UdevEvent};
+use smithay::desktop::space::SpaceRenderElements;
+use smithay::input::pointer::CursorImageStatus;
 use smithay::output::{Mode as WlMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::EventLoop;
+use smithay::reexports::wayland_server::Resource;
 // `control::Device` is the trait that exposes `get_connector`, `get_encoder`,
 // `resource_handles` etc. on a DrmDevice. The top-level `drm::Device` is only
 // for raw fd accessors and isn't what we want here.
@@ -49,6 +52,7 @@ use smithay::reexports::rustix::fs::OFlags;
 use smithay::utils::{DeviceFd, Transform};
 use tracing::{info, warn};
 
+use crate::cursor::{build_cursor_elements, CursorElement, CursorRender};
 use crate::state::Vibewm;
 
 /// Color format we negotiate with the DRM driver. Argb8888 is the lowest
@@ -56,22 +60,27 @@ use crate::state::Vibewm;
 /// upgraded to 10-bit on capable hardware in a follow-up.
 const COLOR_FORMAT: Fourcc = Fourcc::Argb8888;
 
-/// Inner cursor square side, in compositor-logical pixels. A black square on
-/// a white border, both solid; placeholder until xcursor / client-set cursor
-/// surfaces land.
-const CURSOR_SIZE: i32 = 12;
-/// White outline ring around the cursor — 2 px of border on each side.
-const CURSOR_BORDER: i32 = 2;
-
-// Wrapper enum so the cursor SolidColor element can ride alongside the
-// space's WaylandSurface elements through `DrmCompositor::render_frame`.
-// Concretely instantiated to GlesRenderer because that's the only renderer
-// the udev backend uses today; the macro's where-clause grammar makes it
-// awkward to keep this generic across multiple trait bounds.
+// Wrapper enum so cursor render elements can ride alongside the space's
+// WaylandSurface elements through `DrmCompositor::render_frame`. Concretely
+// instantiated to GlesRenderer because that's the only renderer the udev
+// backend uses today; the macro's where-clause grammar makes it awkward to
+// keep this generic across multiple trait bounds.
 render_elements! {
     pub OutputRenderElements<=GlesRenderer>;
     Space=SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
-    Cursor=SolidColorRenderElement,
+    CursorSurface=WaylandSurfaceRenderElement<GlesRenderer>,
+    CursorImage=MemoryRenderBufferRenderElement<GlesRenderer>,
+    CursorFallback=SolidColorRenderElement,
+}
+
+impl From<CursorElement> for OutputRenderElements {
+    fn from(elem: CursorElement) -> Self {
+        match elem {
+            CursorElement::Surface(s) => OutputRenderElements::CursorSurface(s),
+            CursorElement::Image(i) => OutputRenderElements::CursorImage(i),
+            CursorElement::Fallback(f) => OutputRenderElements::CursorFallback(f),
+        }
+    }
 }
 
 /// Per-DRM-device state. Today vibewm tracks at most one of these (single
@@ -446,6 +455,13 @@ fn egl_from_gbm(gbm: &GbmDevice<DrmDeviceFd>) -> Result<EGLDisplay, Box<dyn std:
 /// completion notice. Calling it here would double-ack and confuse the
 /// compositor's internal state.
 fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
+    // W1c-25-4: tick any in-flight position animations *before* building
+    // render elements. tick_window_anims calls map_element on each
+    // animating window, so the next `render_elements_for_output` reflects
+    // the interpolated positions for this frame.
+    let now = std::time::Instant::now();
+    let anims_active = state.tick_window_anims(now);
+
     let Some(udev) = state.udev.as_mut() else {
         return;
     };
@@ -463,55 +479,30 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
         .render_elements_for_output(&mut device.renderer, &device.output, 1.0)
         .unwrap_or_default();
 
-    // Cursor element: a small black square inside a white border at the
-    // pointer's current location. Drawn first → painted last → on top.
-    // Replaced by a real xcursor / client-surface cursor in W1c-19+.
-    let cursor_elems = state.seat.get_pointer().map(|ptr| {
-        let scale = device.output.current_scale().fractional_scale();
-        let loc = ptr.current_location();
-        let lx = loc.x as i32;
-        let ly = loc.y as i32;
-        let outer = smithay::utils::Rectangle::new(
-            (lx - CURSOR_BORDER, ly - CURSOR_BORDER).into(),
-            (
-                CURSOR_SIZE + CURSOR_BORDER * 2,
-                CURSOR_SIZE + CURSOR_BORDER * 2,
-            )
-                .into(),
-        );
-        let inner = smithay::utils::Rectangle::new(
-            (lx, ly).into(),
-            (CURSOR_SIZE, CURSOR_SIZE).into(),
-        );
-        let white = SolidColorRenderElement::new(
-            smithay::backend::renderer::element::Id::new(),
-            outer.to_physical_precise_round(scale),
-            0,
-            Color32F::from([1.0, 1.0, 1.0, 1.0]),
-            // Kind::Cursor would try to put this on the DRM cursor plane,
-            // which is unreliable on virtio-gpu. Unspecified forces the
-            // primary plane via the GLES pipeline.
-            Kind::Unspecified,
-        );
-        let black = SolidColorRenderElement::new(
-            smithay::backend::renderer::element::Id::new(),
-            inner.to_physical_precise_round(scale),
-            0,
-            Color32F::from([0.0, 0.0, 0.0, 1.0]),
-            // Kind::Cursor would try to put this on the DRM cursor plane,
-            // which is unreliable on virtio-gpu. Unspecified forces the
-            // primary plane via the GLES pipeline.
-            Kind::Unspecified,
-        );
-        // black drawn first → ends up on top of white border.
-        [black, white]
-    });
+    // Cursor: dispatch on cursor_status — client-set surface, named xcursor
+    // image, or fallback square. Drawn first → painted last → on top.
+    let scale = device.output.current_scale().fractional_scale();
+    let elapsed = state.start_time.elapsed();
+    let cursor_render = match state.seat.get_pointer() {
+        Some(ptr) => build_cursor_elements(
+            &mut state.cursor_theme,
+            &mut device.renderer,
+            &state.cursor_status,
+            ptr.current_location(),
+            scale,
+            elapsed,
+        ),
+        None => CursorRender {
+            elements: Vec::new(),
+            next_frame_in: None,
+        },
+    };
+    let next_cursor_frame = cursor_render.next_frame_in;
+    let cursor_elems: Vec<CursorElement> = cursor_render.elements;
 
-    let mut elements: Vec<OutputRenderElements> = Vec::with_capacity(space_elements.len() + 2);
-    if let Some([black, white]) = cursor_elems {
-        elements.push(OutputRenderElements::Cursor(black));
-        elements.push(OutputRenderElements::Cursor(white));
-    }
+    let mut elements: Vec<OutputRenderElements> =
+        Vec::with_capacity(space_elements.len() + cursor_elems.len());
+    elements.extend(cursor_elems.into_iter().map(OutputRenderElements::from));
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
 
     let render_res = comp.render_frame::<_, _>(
@@ -560,6 +551,36 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
             Some(device.output.clone())
         });
     });
+
+    // Animated cursors: schedule another render in time for the next
+    // frame. Static cursors and the surface-set path return None and the
+    // existing event-driven render cadence handles them.
+    if let Some(delay) = next_cursor_frame {
+        schedule_render_after(state, drm_node, delay);
+    }
+
+    // W1c-25-4: while position animations are still running, kick the
+    // next frame ~16ms out to keep them progressing without waiting on
+    // a wayland surface commit. Cleared automatically once the render
+    // path observes an empty `window_anims` map.
+    if anims_active {
+        schedule_render_after(state, drm_node, Duration::from_millis(16));
+    }
+
+    // Cursor surfaces aren't tracked in `Space`, so send their frame
+    // callbacks separately. Without this an animated client-set cursor
+    // would never advance past frame 1.
+    if let CursorImageStatus::Surface(surface) = &state.cursor_status {
+        if surface.is_alive() {
+            smithay::desktop::utils::send_frames_surface_tree(
+                surface,
+                &device.output,
+                now,
+                Some(Duration::ZERO),
+                |_, _| Some(device.output.clone()),
+            );
+        }
+    }
 
     // Flush queued wayland-server events out to clients. Without this, our
     // protocol responses (registry globals, configure events, frame

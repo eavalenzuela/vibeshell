@@ -4,11 +4,18 @@
 //! quirks, and pointer-relative motion handling stay basic for W1b.
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, ButtonState, Event, InputBackend, InputEvent, KeyboardKeyEvent,
+    AbsolutePositionEvent, Axis, ButtonState, Event, GestureBeginEvent, GestureEndEvent,
+    GesturePinchUpdateEvent, GestureSwipeUpdateEvent, InputBackend, InputEvent, KeyboardKeyEvent,
     PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::input::keyboard::FilterResult;
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{
+    AxisFrame, ButtonEvent, GestureHoldBeginEvent as SmithayHoldBegin,
+    GestureHoldEndEvent as SmithayHoldEnd, GesturePinchBeginEvent as SmithayPinchBegin,
+    GesturePinchEndEvent as SmithayPinchEnd, GesturePinchUpdateEvent as SmithayPinchUpdate,
+    GestureSwipeBeginEvent as SmithaySwipeBegin, GestureSwipeEndEvent as SmithaySwipeEnd,
+    GestureSwipeUpdateEvent as SmithaySwipeUpdate, MotionEvent,
+};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::SERIAL_COUNTER;
 
@@ -155,6 +162,127 @@ impl Vibewm {
                 if let Some(pointer) = self.seat.get_pointer() {
                     pointer.axis(self, frame);
                     pointer.frame(self);
+                }
+            }
+            // Touchpad gestures (libinput-only; winit doesn't emit these).
+            // Two consumers per event:
+            //   1. `state.gestures` accumulates and decides on End whether
+            //      to fire a compositor action (cluster cycle, zoom-mode).
+            //   2. The wp-pointer-gestures-v1 protocol forwards the event
+            //      to the focused client (browser pinch-zoom etc.).
+            // Both run unconditionally — overlap is acceptable in practice
+            // (user intent for cluster-cycling is over the desktop, not
+            // over a content area where a client also handles gestures).
+            InputEvent::GestureSwipeBegin { event } => {
+                self.gestures.on_swipe_begin(event.fingers());
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.gesture_swipe_begin(
+                        self,
+                        &SmithaySwipeBegin {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                            fingers: event.fingers(),
+                        },
+                    );
+                }
+            }
+            InputEvent::GestureSwipeUpdate { event } => {
+                self.gestures
+                    .on_swipe_update(event.delta_x(), event.delta_y());
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.gesture_swipe_update(
+                        self,
+                        &SmithaySwipeUpdate {
+                            time: event.time_msec(),
+                            delta: (event.delta_x(), event.delta_y()).into(),
+                        },
+                    );
+                }
+            }
+            InputEvent::GestureSwipeEnd { event } => {
+                let cancelled = event.cancelled();
+                if let Some(action) = self.gestures.on_swipe_end(cancelled) {
+                    action.dispatch();
+                }
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.gesture_swipe_end(
+                        self,
+                        &SmithaySwipeEnd {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                            cancelled,
+                        },
+                    );
+                }
+            }
+            InputEvent::GesturePinchBegin { event } => {
+                self.gestures.on_pinch_begin();
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.gesture_pinch_begin(
+                        self,
+                        &SmithayPinchBegin {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                            fingers: event.fingers(),
+                        },
+                    );
+                }
+            }
+            InputEvent::GesturePinchUpdate { event } => {
+                self.gestures.on_pinch_update(event.scale());
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.gesture_pinch_update(
+                        self,
+                        &SmithayPinchUpdate {
+                            time: event.time_msec(),
+                            delta: (event.delta_x(), event.delta_y()).into(),
+                            scale: event.scale(),
+                            rotation: event.rotation(),
+                        },
+                    );
+                }
+            }
+            InputEvent::GesturePinchEnd { event } => {
+                let cancelled = event.cancelled();
+                if let Some(action) = self.gestures.on_pinch_end(cancelled) {
+                    action.dispatch();
+                }
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.gesture_pinch_end(
+                        self,
+                        &SmithayPinchEnd {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                            cancelled,
+                        },
+                    );
+                }
+            }
+            // Hold gestures: forward to client only — no compositor binding
+            // today (reserve for future "show overview" or similar). Smithay
+            // routes to the focused client via wp-pointer-gestures-v1.
+            InputEvent::GestureHoldBegin { event } => {
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.gesture_hold_begin(
+                        self,
+                        &SmithayHoldBegin {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                            fingers: event.fingers(),
+                        },
+                    );
+                }
+            }
+            InputEvent::GestureHoldEnd { event } => {
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.gesture_hold_end(
+                        self,
+                        &SmithayHoldEnd {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                            cancelled: event.cancelled(),
+                        },
+                    );
                 }
             }
             _ => {}

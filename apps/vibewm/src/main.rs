@@ -8,6 +8,10 @@
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::wayland_server::Display;
 
+mod anim;
+#[cfg(feature = "udev")]
+mod cursor;
+mod gestures;
 mod grabs;
 mod handlers;
 mod input;
