@@ -110,6 +110,18 @@ pub struct UdevState {
     devices: HashMap<DrmNode, DeviceData>,
 }
 
+impl UdevState {
+    /// First device's `(GlesRenderer, Output)`, mutably. Single-GPU/
+    /// single-output assumption matches the rest of the udev path. Used
+    /// by `Vibewm::capture_cluster_thumbnail` (W1c-25-5b) so it can
+    /// render the active cluster offscreen without touching the DRM
+    /// compositor's framebuffer.
+    pub fn first_renderer_and_output(&mut self) -> Option<(&mut GlesRenderer, &Output)> {
+        let device = self.devices.values_mut().next()?;
+        Some((&mut device.renderer, &device.output))
+    }
+}
+
 /// Entry point: wires session, udev, libinput, and the first available DRM
 /// device into vibewm's calloop. Doesn't return until the compositor exits;
 /// shares the same `EventLoop<Vibewm>` as the wayland-server / IPC sources

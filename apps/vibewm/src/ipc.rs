@@ -498,27 +498,39 @@ impl Vibewm {
         });
     }
 
-    /// Capture a thumbnail for `cluster`. W1c-25-5a (placeholder): emits
-    /// a procedural gradient keyed off cluster id so the wire works
-    /// end-to-end and overlay can verify its rendering path. W1c-25-5b
-    /// will swap this for a real offscreen GlesRenderer capture of the
-    /// cluster's mapped windows. Sized to fit `max_width`/`max_height`
-    /// while preserving roughly 16:9 — overlay's cluster cards are
-    /// 320×140 (CARD_WIDTH/CARD_HEIGHT) so callers usually pass close
-    /// to that. Returns `None` when the cluster id isn't known.
+    /// Capture a thumbnail for `cluster`. W1c-25-5b: tries a real
+    /// offscreen GlesRenderer capture of the active cluster's mapped
+    /// windows; falls back to W1c-25-5a's procedural placeholder when
+    /// the udev backend isn't running, the cluster isn't active, or
+    /// the GLES path errors out.
+    ///
+    /// Sized to fit `max_width`/`max_height` while preserving the
+    /// active output's aspect ratio. Returns `None` when the cluster
+    /// id isn't known.
     pub fn capture_cluster_thumbnail(
-        &self,
+        &mut self,
         cluster: common::contracts::ClusterId,
         max_width: u32,
         max_height: u32,
     ) -> Option<common::contracts::ClusterThumbnail> {
-        // Treat unknown cluster ids as "no thumbnail" rather than an
-        // error so overlay can poll for missing thumbnails harmlessly.
         if !self.model.clusters.iter().any(|c| c.id == cluster) {
             return None;
         }
-        let w = max_width.clamp(8, 320);
-        let h = max_height.clamp(8, 180);
+        let w_cap = max_width.clamp(8, 320);
+        let h_cap = max_height.clamp(8, 180);
+
+        // Real capture path — only the active cluster, only under the
+        // udev backend (winit's renderer isn't reachable from a method
+        // call and the dev path doesn't need real screenshots anyway).
+        #[cfg(feature = "udev")]
+        if self.model.active_cluster == cluster {
+            if let Some(thumb) = self.capture_active_offscreen(w_cap, h_cap) {
+                return Some(thumb);
+            }
+        }
+
+        // Fallback: procedural placeholder so inactive clusters and
+        // capture failures still ship something visually distinct.
         let window_count = self
             .model
             .clusters
@@ -526,7 +538,111 @@ impl Vibewm {
             .find(|c| c.id == cluster)
             .map(|c| c.windows.len())
             .unwrap_or(0);
-        Some(generate_placeholder_thumbnail(cluster, window_count, w, h))
+        Some(generate_placeholder_thumbnail(
+            cluster,
+            window_count,
+            w_cap,
+            h_cap,
+        ))
+    }
+
+    /// Bind an offscreen GlesTexture, render the space's elements into
+    /// it at the thumbnail's downscale, then ExportMem the bytes.
+    /// Returns `None` if any GLES step errors — caller falls back to
+    /// the placeholder.
+    #[cfg(feature = "udev")]
+    fn capture_active_offscreen(
+        &mut self,
+        max_width: u32,
+        max_height: u32,
+    ) -> Option<common::contracts::ClusterThumbnail> {
+        use smithay::backend::allocator::Fourcc;
+        use smithay::backend::renderer::gles::GlesTexture;
+        use smithay::backend::renderer::utils::draw_render_elements;
+        use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen, Renderer};
+        use smithay::utils::{Rectangle, Transform};
+
+        let udev = self.udev.as_mut()?;
+        let (renderer, output) = udev.first_renderer_and_output()?;
+        let mode = output.current_mode()?;
+        let out_w = mode.size.w.max(1);
+        let out_h = mode.size.h.max(1);
+
+        // Preserve the output's aspect ratio inside the requested cap.
+        let aspect = out_w as f32 / out_h as f32;
+        let (thumb_w, thumb_h) = if (max_width as f32 / aspect) <= max_height as f32 {
+            let w = max_width;
+            let h = ((w as f32) / aspect).round().max(1.0) as u32;
+            (w, h)
+        } else {
+            let h = max_height;
+            let w = ((h as f32) * aspect).round().max(1.0) as u32;
+            (w, h)
+        };
+        let thumb_size_phys = smithay::utils::Size::<i32, smithay::utils::Physical>::from((
+            thumb_w as i32,
+            thumb_h as i32,
+        ));
+
+        // Collect elements at the output's native scale; the offscreen
+        // frame downscale handles the size reduction during render.
+        let elements: Vec<
+            smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<
+                smithay::backend::renderer::gles::GlesRenderer,
+            >,
+        > = self
+            .space
+            .render_elements_for_output(renderer, output, 1.0)
+            .ok()?;
+
+        let mut texture: GlesTexture = renderer
+            .create_buffer(
+                Fourcc::Argb8888,
+                smithay::utils::Size::<i32, smithay::utils::Buffer>::from((
+                    thumb_w as i32,
+                    thumb_h as i32,
+                )),
+            )
+            .ok()?;
+        let mut framebuffer = renderer.bind(&mut texture).ok()?;
+        let thumb_scale = thumb_w as f64 / out_w as f64;
+        {
+            let mut frame = renderer
+                .render(&mut framebuffer, thumb_size_phys, Transform::Normal)
+                .ok()?;
+            let full = Rectangle::from_size(thumb_size_phys);
+            frame
+                .clear(Color32F::from([0.05, 0.05, 0.07, 1.0]), &[full])
+                .ok()?;
+            draw_render_elements::<smithay::backend::renderer::gles::GlesRenderer, _, _>(
+                &mut frame,
+                thumb_scale,
+                &elements,
+                &[full],
+            )
+            .ok()?;
+            let _sync = frame.finish().ok()?;
+        }
+
+        let buffer_region = smithay::utils::Rectangle::<i32, smithay::utils::Buffer>::from_size(
+            smithay::utils::Size::from((thumb_w as i32, thumb_h as i32)),
+        );
+        let mapping = renderer
+            .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Argb8888)
+            .ok()?;
+        let bytes = renderer.map_texture(&mapping).ok()?;
+        // Argb8888 on little-endian is byte-order BGRA. Swap channels
+        // 0/2 in place to match our wire's RGBA layout. Alpha already
+        // matches.
+        let mut rgba = bytes.to_vec();
+        for chunk in rgba.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+        Some(common::contracts::ClusterThumbnail {
+            width: thumb_w,
+            height: thumb_h,
+            rgba_base64: base64_encode(&rgba),
+        })
     }
 
     fn broadcast_event(&mut self, event: VibewmEvent) {
