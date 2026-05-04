@@ -251,3 +251,81 @@ Features and code paths that exist but are not fully wired into the running syst
 - [x] **Typed partial-failure `IpcResponse` errors** — descoped 2026-04-29. Roadmap framing assumed batched mutations (with partial-success states); the protocol has none — every IPC is a single mutation with a single response. Renaming `String` → enum-wrapping-`String` without that use case is ceremony. Revisit if/when batched mutations are introduced.
 
 **Exit criteria (revised):** panel network status now reads via DBus (no `nmcli` fork); a brief daemon restart no longer drops in-flight user actions on a single socket retry. Audio DBus and event-driven push deferred per descopes above.
+
+---
+
+### [ ] Phase 10 — Daily-driver readiness
+
+**Theme:** what does it take for vibeshell to replace mutter on a real Ubuntu install? Each tier represents a hard blocker for the tier below it. Don't start Tier 2 until Tier 1 is done — order matters because users hit them in this exact sequence.
+
+Status as of 2026-05-04: vibewm boots and runs the shell (Phase 8 ✓), but daily-driver replacement is gated on the protocol surface below. Estimated ordering, not commitments — each protocol has edge cases that surface only under real-world use.
+
+#### Tier 0 — Boot from gdm
+
+Without these, you can't even get into vibeshell from a normal login screen.
+
+- [ ] **`vibeshell.desktop` session entry** — `/usr/share/wayland-sessions/vibeshell.desktop` invoking `start-vibeshell-session` with proper `Type=Application`, `Exec=`, `DesktopNames=vibeshell`. Install via package or `make install` target.
+- [ ] **logind session leader claim** — vibewm already calls `LibSeatSession::new()` (Phase 8 W1c-16); verify it cleanly takes over from gdm-launched session and surrenders on logout. Probably needs minor tweaks once tested in-anger.
+- [ ] **Logout exits cleanly to login screen** — vibewm needs to receive SIGTERM gracefully, drop the seat, signal the session bus that the session is over. Currently vibewm exits but doesn't notify systemd-logind.
+
+#### Tier 1 — Apps that don't render or break instantly
+
+The complaints any user files within 5 minutes.
+
+- [ ] **`wlr-foreign-toplevel-management-v1`** — every taskbar (waybar, the Ubuntu dock if anyone tries it, even our own panel for window-list integration) needs this to enumerate windows and switch focus. Smithay ships server-side support. ~1 session.
+- [ ] **`wlr-data-control-v1`** — clipboard managers (`wl-copy`, `wl-paste`, clipman, copyq) need this. Without it, copy/paste between apps works but clipboard history doesn't. Smithay support exists. ~1 session.
+- [ ] **`wlr-screencopy-v1`** — OBS, screenshot tools (grim/slurp), screen recording (wf-recorder), Zoom/Discord screen share. Was deferred in W1c-25 in favor of custom IPC for our own thumbnails; daily-driver use needs the actual protocol. **Multi-session lift** — frame copy semantics, dmabuf negotiation, per-frame state machine. The hardest single Tier 1 item.
+- [ ] **`wp-fractional-scale-v1` + `wp-viewporter`** — anyone with a HiDPI laptop (most modern Ubuntu installs) gets either blurry or comically-sized everything without these. Smithay has both. ~1 session.
+- [ ] **`xdg-foreign`** — file pickers in Flatpak/sandboxed apps use this to grant access to dirs outside the sandbox. Without it, file dialogs in Firefox-as-snap, Slack, Discord are broken. ~1 session.
+
+#### Tier 2 — Daily friction without
+
+You can boot and use most apps, but life is annoying.
+
+- [ ] **`ext-session-lock-v1`** — swaylock, gtklock, or our own lock screen. Without this, you can't lock the screen. Smithay support exists. ~1 session for the protocol; another for a vibeshell-themed lock screen UI.
+- [ ] **`idle-notify-v1` + `idle-inhibit-v1`** — screen lockers to know when to lock; mpv/zoom to keep screen awake during video. Smithay support exists. ~1 session both.
+- [ ] **`xdg-desktop-portal` backend** — Flatpak apps (most Ubuntu desktop apps in 2026) use portals for file dialogs, screen share, opening URLs, settings access. Either implement `xdg-desktop-portal-vibeshell` from scratch or bridge to `xdg-desktop-portal-wlr` (the wlroots reference impl) by exposing the protocols it needs (screencopy, foreign-toplevel, data-control). Bridging is faster but constrains us to whatever wlr supports. **Multi-session.**
+- [ ] **`wlr-output-management-v1`** — `wlr-randr`, GUIs like `nwg-displays`, system tools that twiddle resolution/refresh. Without it: locked at boot config. Smithay has the protocol. ~1 session.
+- [ ] **`wp-cursor-shape-v1`** — newer cursor protocol that Qt 6 apps prefer. Falls back to wp_pointer.set_cursor (W1c-20) if missing, but loses the shape-name semantics. ~half session.
+- [ ] **Output hot-plug** — vibewm's UdevEvent::Added handler is currently `info!("hot-plug not handled yet")`. Plugging in an external monitor today does nothing. Wire the existing handler to `open_drm_device` + register the new output with `space.map_output`. ~1 session — risk is in the edge cases (mode change, primary output change, cluster repositioning).
+
+#### Tier 3 — Power/laptop behavior
+
+If your machine moves, these matter.
+
+- [ ] **Lid-close suspend** — listen on logind's `PrepareForSleep` D-Bus signal; trigger compositor suspend (turn off outputs, lock if configured). ~1 session.
+- [ ] **Brightness keys (XF86MonBrightnessUp/Down)** — wired in keybindings already (spawn `brightnessctl`); verify they actually fire under the udev backend. Likely already works.
+- [ ] **Battery indicator + low-battery warnings** — panel reads via UPower D-Bus; toast when <10%. ~half session.
+- [ ] **Audio media keys (XF86AudioRaiseVolume etc.)** — currently spawn `wpctl`; verify under udev. Note Phase 9 descope: native PipeWire is bigger work — spawning is fine for now.
+
+#### Tier 4 — Hardware coverage
+
+Long tail. Hit-or-miss for any given user.
+
+- [ ] **Multi-GPU (laptop hybrid graphics)** — vibewm picks the first DRM device. Real laptops have iGPU + dGPU, want render-on-dGPU + scanout-on-iGPU. Smithay has multigpu support. **Multi-session.**
+- [ ] **NVIDIA proprietary** — separately fraught; smithay generally works on Nouveau but proprietary needs `wl_drm` + EGL/dmabuf paths that break in subtle ways. Realistically: blocked until you have an NVIDIA box to test on.
+- [ ] **DRM lease (VR headsets, VRR monitors)** — `wp-drm-lease-v1`. Niche but the people who care REALLY care.
+- [ ] **HDR / 10-bit color** — Wayland's HDR story is still in flux; protocols haven't stabilized. Defer indefinitely.
+- [ ] **Touchscreen** — vibewm forwards touch events via smithay; verify pinch-to-zoom and tap-as-click work on a touchscreen-capable VM or device.
+
+#### Tier 5 — Accessibility + i18n
+
+Easy to defer; impossible to ship a real DE without.
+
+- [ ] **IME / input method support** — `text-input-v3` + integration with IBus/fcitx for users typing CJK, dead-keys for European layouts. **Multi-session.**
+- [ ] **Accessibility tree** — `at-spi` integration for screen readers (Orca). Smithay doesn't help here; this is GTK-app responsibility for our own apps + the wider compositor a11y story for clients.
+- [ ] **High-contrast / large-text themes** — STYLE.md has a single palette. Add a high-contrast variant + size-token system. ~1 session.
+
+#### Tier 6 — Polish + parity with mutter quirks
+
+- [ ] **xdg-activation-v1** — apps requesting focus when launched from a different app (e.g. Slack notification opens browser to a URL). Smithay has it. ~half session.
+- [ ] **`wlr-virtual-pointer-v1` / `wlr-virtual-keyboard-v1`** — for `ydotool`, accessibility tools, automation. ~1 session.
+- [ ] **Per-app notification preferences** — notifd already routes; add a per-app rules file for "do not disturb", "urgent only", etc. ~1 session.
+
+#### Suggested sequencing
+
+**Path A — Curated workflow** (terminal + browser + editor, single monitor, no Flatpaks): Tier 0 → Tier 1 (skip xdg-foreign + screencopy) → Tier 2 (skip portals). Probably 2-4 weeks of focused work. You're daily-driving for "real coding" use cases.
+
+**Path B — Full Ubuntu replacement**: Tier 0 → Tier 1 → Tier 2 → Tier 3 → Tier 4. Realistic estimate: 6-12 months. The xdg-desktop-portal piece is the boss fight — Flatpak apps are most of the Ubuntu desktop in 2026, and without portal support they're crippled.
+
+**Decision criterion for "ready"**: dual-session for ≥2 weeks of daily use, falling back to GNOME for specific tasks. Track each fallback as a Phase 10 item. When the fallback list goes a week without growing, vibeshell is ready.
