@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use common::contracts::{
     CanvasState, Cluster, ClusterId, Viewport, Window, ZoomLevel, ZoomTransition,
 };
+use gtk::cairo;
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
@@ -111,6 +112,15 @@ struct WidgetState {
     /// the W1c-25-1 undive animation from restarting every poll for the
     /// duration the transition is observable.
     last_handled_transition_at: Option<u64>,
+    /// W1c-25-5: per-cluster thumbnail surfaces, painted as the card
+    /// background in `draw_cluster_card`. Decoded once on first fetch
+    /// from the daemon and reused on every draw. Re-fetched when the
+    /// cluster's `state_revision` changes (rough cache invalidator —
+    /// good enough for now since revision bumps on every mutation).
+    cluster_thumbnails: HashMap<ClusterId, cairo::ImageSurface>,
+    /// `state_revision` snapshot at the time we fetched each thumbnail.
+    /// When the live state revision moves past this, we re-fetch.
+    cluster_thumbnail_revisions: HashMap<ClusterId, u64>,
 }
 
 impl OverviewCanvas {
@@ -163,6 +173,8 @@ impl OverviewCanvas {
             viewport_anim: None,
             inertia_active: false,
             last_handled_transition_at: None,
+            cluster_thumbnails: HashMap::new(),
+            cluster_thumbnail_revisions: HashMap::new(),
         }));
 
         area.set_draw_func({
@@ -824,7 +836,146 @@ impl OverviewCanvas {
         if let Some(cluster_id) = undive_target {
             start_undive_anim(&self.area, Rc::clone(&self.data), cluster_id);
         }
+        // W1c-25-5: refresh any stale cluster thumbnails. Cheap when
+        // there's nothing to fetch (single mutex check); on first paint
+        // and after every state-revision bump it pulls one IPC per
+        // cluster and decodes into a Cairo surface.
+        refresh_cluster_thumbnails(&self.data, &self.area);
     }
+}
+
+/// Pull missing-or-stale cluster thumbnails from the daemon and stash
+/// the decoded Cairo surfaces in WidgetState for `draw_cluster_card`.
+///
+/// "Stale" = the cluster's state_revision moved past what we cached the
+/// thumbnail at. That's the same coarse invalidator the daemon uses to
+/// notify subscribers (W1c-25-7), so a thumbnail refresh trails a state
+/// mutation by one socket-RTT.
+fn refresh_cluster_thumbnails(data: &Rc<RefCell<WidgetState>>, area: &gtk::DrawingArea) {
+    let to_fetch: Vec<(ClusterId, u64)> = {
+        let state = data.borrow();
+        let revision = state.canvas_state.state_revision;
+        state
+            .canvas_state
+            .clusters
+            .iter()
+            .filter_map(|c| {
+                let cached_at = state.cluster_thumbnail_revisions.get(&c.id).copied();
+                if cached_at.is_some() && cached_at == Some(revision) {
+                    None
+                } else {
+                    Some((c.id, revision))
+                }
+            })
+            .collect()
+    };
+    if to_fetch.is_empty() {
+        return;
+    }
+    let mut fetched: Vec<(ClusterId, u64, Option<cairo::ImageSurface>)> =
+        Vec::with_capacity(to_fetch.len());
+    for (cluster_id, revision) in to_fetch {
+        let surface = fetch_thumbnail_surface(cluster_id);
+        fetched.push((cluster_id, revision, surface));
+    }
+    let mut state = data.borrow_mut();
+    let mut any = false;
+    for (cluster_id, revision, surface) in fetched {
+        state
+            .cluster_thumbnail_revisions
+            .insert(cluster_id, revision);
+        if let Some(surface) = surface {
+            state.cluster_thumbnails.insert(cluster_id, surface);
+            any = true;
+        }
+    }
+    drop(state);
+    if any {
+        area.queue_draw();
+    }
+}
+
+fn fetch_thumbnail_surface(cluster: ClusterId) -> Option<cairo::ImageSurface> {
+    use common::contracts::{IpcRequest, IpcResponse};
+    let response =
+        crate::interaction::try_dispatch_via_socket(&IpcRequest::GetClusterThumbnail { cluster })?;
+    let thumb = match response {
+        IpcResponse::Thumbnail(t) => t,
+        IpcResponse::ThumbnailMissing => return None,
+        _ => return None,
+    };
+    let rgba = decode_base64(&thumb.rgba_base64)?;
+    rgba_to_cairo_surface(rgba, thumb.width as i32, thumb.height as i32)
+}
+
+/// Convert RGBA (top-to-bottom, non-premultiplied) to Cairo's ARgb32
+/// (BGRA byte order, premultiplied alpha) and wrap as ImageSurface.
+fn rgba_to_cairo_surface(rgba: Vec<u8>, width: i32, height: i32) -> Option<cairo::ImageSurface> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let stride = cairo::Format::ARgb32.stride_for_width(width as u32).ok()?;
+    let mut data = vec![0u8; (stride * height) as usize];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let src = (y * width as usize + x) * 4;
+            let dst = y * stride as usize + x * 4;
+            if src + 3 >= rgba.len() {
+                return None;
+            }
+            let r = rgba[src];
+            let g = rgba[src + 1];
+            let b = rgba[src + 2];
+            let a = rgba[src + 3];
+            // Premultiply on conversion.
+            let af = a as f32 / 255.0;
+            data[dst] = (b as f32 * af) as u8;
+            data[dst + 1] = (g as f32 * af) as u8;
+            data[dst + 2] = (r as f32 * af) as u8;
+            data[dst + 3] = a;
+        }
+    }
+    cairo::ImageSurface::create_for_data(data, cairo::Format::ARgb32, width, height, stride).ok()
+}
+
+/// Standard base64 decoder. Mirror of the encoder in
+/// `apps/vibewm/src/ipc.rs::base64_encode` so the wire stays decoder-
+/// agnostic. Returns None on malformed input.
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        let c0 = val(bytes[i])?;
+        let c1 = val(bytes[i + 1])?;
+        let (c2, has2) = match bytes[i + 2] {
+            b'=' => (0, false),
+            c => (val(c)?, true),
+        };
+        let (c3, has3) = match bytes[i + 3] {
+            b'=' => (0, false),
+            c => (val(c)?, true),
+        };
+        out.push((c0 << 2) | (c1 >> 4));
+        if has2 {
+            out.push((c1 << 4) | (c2 >> 2));
+        }
+        if has3 {
+            out.push((c2 << 6) | c3);
+        }
+        i += 4;
+    }
+    Some(out)
 }
 
 /// Inspect the incoming canvas state and decide whether to fire an undive
@@ -1154,13 +1305,35 @@ fn draw_cluster_card(
     let rect_y = sy - CARD_HEIGHT / 2.0;
 
     let selected = state.selected_cluster == Some(cluster.id);
-    if selected {
-        cr.set_source_rgba(0.25, 0.54, 0.95, 0.94);
+
+    // W1c-25-5: paint the cached thumbnail under the card if we have
+    // one. Falls back to the solid color background otherwise. Thumbnail
+    // is rendered first so subsequent text draws over it; selection is a
+    // translucent tint on top so the thumbnail still shows through.
+    let thumbnail = state.cluster_thumbnails.get(&cluster.id);
+    if let Some(surface) = thumbnail {
+        let surface_w = surface.width() as f64;
+        let surface_h = surface.height() as f64;
+        if surface_w > 0.0 && surface_h > 0.0 {
+            let scale_x = CARD_WIDTH / surface_w;
+            let scale_y = CARD_HEIGHT / surface_h;
+            cr.save().ok();
+            cr.translate(rect_x, rect_y);
+            cr.scale(scale_x, scale_y);
+            let _ = cr.set_source_surface(surface, 0.0, 0.0);
+            let _ = cr.paint();
+            cr.restore().ok();
+        }
     } else {
         cr.set_source_rgba(0.15, 0.16, 0.18, 0.92);
+        cr.rectangle(rect_x, rect_y, CARD_WIDTH, CARD_HEIGHT);
+        let _ = cr.fill();
     }
-    cr.rectangle(rect_x, rect_y, CARD_WIDTH, CARD_HEIGHT);
-    let _ = cr.fill();
+    if selected {
+        cr.set_source_rgba(0.25, 0.54, 0.95, 0.30);
+        cr.rectangle(rect_x, rect_y, CARD_WIDTH, CARD_HEIGHT);
+        let _ = cr.fill();
+    }
 
     cr.set_source_rgb(0.85, 0.88, 0.92);
     cr.select_font_face(

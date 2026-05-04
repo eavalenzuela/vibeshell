@@ -160,6 +160,26 @@ impl WmBackend for WlrootsBackend {
             && matches!(self.dispatch(VibewmRequest::Ping), Ok(VibewmResponse::Pong))
     }
 
+    fn capture_cluster_thumbnail(
+        &mut self,
+        cluster: ClusterId,
+        max_width: u32,
+        max_height: u32,
+    ) -> Result<Option<common::contracts::ClusterThumbnail>, BackendError> {
+        match self.dispatch(VibewmRequest::CaptureClusterThumbnail {
+            cluster,
+            max_width,
+            max_height,
+        })? {
+            VibewmResponse::Thumbnail(thumb) => Ok(Some(thumb)),
+            VibewmResponse::ThumbnailMissing => Ok(None),
+            VibewmResponse::Error { message } => Err(BackendError::Other(message)),
+            other => Err(BackendError::Other(format!(
+                "CaptureClusterThumbnail returned: {other:?}"
+            ))),
+        }
+    }
+
     fn spawn_event_stream(&self) -> Result<Receiver<WmSignal>, BackendError> {
         let socket_path = self.socket_path.clone();
         let (tx, rx) = mpsc::channel();

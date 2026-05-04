@@ -327,6 +327,45 @@ else
   fail "Expected 'event' line after mutation, got: $(cat "${SUBSCRIBE_OUT}")"
 fi
 
+# ── Test: thumbnail pipeline (W1c-25-5) ──────────────────────────────────────
+# Mock vibewm returns a procedural placeholder thumbnail per cluster on
+# CaptureClusterThumbnail; daemon caches it via the ClusterMapped event
+# fired by the mock after activate-cluster. Overlay reads it via
+# GetClusterThumbnail. We simulate the overlay query via vibeshellctl.
+
+section "IPC: cluster thumbnail pipeline"
+
+# Trigger a cluster activation so the daemon's main-loop event-drain
+# fetches a fresh thumbnail from the mock.
+ctl ipc create-cluster thumb-test 1234 567 >/dev/null 2>&1 || true
+sleep 0.4
+THUMB_CLUSTER_ID="$(ctl ipc get-state 2>/dev/null | jq '[.clusters[] | select(.name == "thumb-test")] | first | .id')"
+ctl ipc activate-cluster "${THUMB_CLUSTER_ID}" >/dev/null 2>&1 || true
+sleep 0.4
+
+THUMB_RESP="$(ctl ipc get-cluster-thumbnail "${THUMB_CLUSTER_ID}" 2>/dev/null)"
+THUMB_TYPE="$(echo "${THUMB_RESP}" | jq -r '.type // "unknown"')"
+if [[ "${THUMB_TYPE}" == "thumbnail" ]]; then
+  pass "GetClusterThumbnail returns a thumbnail-typed response"
+elif [[ "${THUMB_TYPE}" == "thumbnail_missing" ]]; then
+  fail "Expected thumbnail; got thumbnail_missing (cache not populated by ClusterMapped event)"
+else
+  fail "Expected thumbnail response, got type=${THUMB_TYPE}: ${THUMB_RESP}"
+fi
+
+# The mock's placeholder is at minimum 8×8 — verify width/height + a
+# non-empty rgba_base64 payload to prove the bytes round-tripped. The
+# JSON shape for a tagged newtype variant is `{"type":"thumbnail",...
+# fields-flattened}` — Serde's internally-tagged representation puts
+# struct fields at the top level, not under `data`.
+THUMB_W="$(echo "${THUMB_RESP}" | jq -r '.width // 0')"
+THUMB_BYTES="$(echo "${THUMB_RESP}" | jq -r '.rgba_base64 // ""' | wc -c)"
+if [[ "${THUMB_W}" -ge 8 ]] && [[ "${THUMB_BYTES}" -gt 64 ]]; then
+  pass "Thumbnail has width=${THUMB_W} and ${THUMB_BYTES}B base64 payload"
+else
+  fail "Thumbnail malformed: width=${THUMB_W} bytes=${THUMB_BYTES}"
+fi
+
 # ── Test: cycle cluster ──────────────────────────────────────────────────────
 
 section "IPC: cycle cluster"

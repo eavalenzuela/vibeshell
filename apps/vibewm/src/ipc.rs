@@ -213,6 +213,14 @@ fn dispatch_request(
             );
             None
         }
+        VibewmRequest::CaptureClusterThumbnail {
+            cluster,
+            max_width,
+            max_height,
+        } => match state.capture_cluster_thumbnail(cluster, max_width, max_height) {
+            Some(thumb) => Some(VibewmResponse::Thumbnail(thumb)),
+            None => Some(VibewmResponse::ThumbnailMissing),
+        },
     }
 }
 
@@ -490,6 +498,37 @@ impl Vibewm {
         });
     }
 
+    /// Capture a thumbnail for `cluster`. W1c-25-5a (placeholder): emits
+    /// a procedural gradient keyed off cluster id so the wire works
+    /// end-to-end and overlay can verify its rendering path. W1c-25-5b
+    /// will swap this for a real offscreen GlesRenderer capture of the
+    /// cluster's mapped windows. Sized to fit `max_width`/`max_height`
+    /// while preserving roughly 16:9 — overlay's cluster cards are
+    /// 320×140 (CARD_WIDTH/CARD_HEIGHT) so callers usually pass close
+    /// to that. Returns `None` when the cluster id isn't known.
+    pub fn capture_cluster_thumbnail(
+        &self,
+        cluster: common::contracts::ClusterId,
+        max_width: u32,
+        max_height: u32,
+    ) -> Option<common::contracts::ClusterThumbnail> {
+        // Treat unknown cluster ids as "no thumbnail" rather than an
+        // error so overlay can poll for missing thumbnails harmlessly.
+        if !self.model.clusters.iter().any(|c| c.id == cluster) {
+            return None;
+        }
+        let w = max_width.clamp(8, 320);
+        let h = max_height.clamp(8, 180);
+        let window_count = self
+            .model
+            .clusters
+            .iter()
+            .find(|c| c.id == cluster)
+            .map(|c| c.windows.len())
+            .unwrap_or(0);
+        Some(generate_placeholder_thumbnail(cluster, window_count, w, h))
+    }
+
     fn broadcast_event(&mut self, event: VibewmEvent) {
         let line = match serde_json::to_string(&VibewmResponse::Event(event)) {
             Ok(s) => s,
@@ -501,4 +540,90 @@ impl Vibewm {
         self.event_subscribers
             .retain_mut(|stream| writeln!(stream, "{line}").is_ok() && stream.flush().is_ok());
     }
+}
+
+/// Procedural thumbnail: a hue-shifted vertical gradient with N darker
+/// rectangles tiled across the bottom representing the cluster's
+/// windows. Visually noisy enough that overlay can confirm the wire
+/// works and cluster cards differ; not a real screenshot. Replaced by
+/// W1c-25-5b's offscreen GlesRenderer capture.
+fn generate_placeholder_thumbnail(
+    cluster: common::contracts::ClusterId,
+    window_count: usize,
+    width: u32,
+    height: u32,
+) -> common::contracts::ClusterThumbnail {
+    let hue = ((cluster.wrapping_mul(67) % 360) as f32) / 60.0;
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    let strip_h = (height / 4).max(8);
+    let strip_top = height.saturating_sub(strip_h);
+    let cells = window_count.max(1);
+    let cell_w = width / cells as u32;
+    for y in 0..height {
+        for x in 0..width {
+            let in_strip = y >= strip_top && cells > 0 && (x % cell_w) > 1 && y > strip_top + 1;
+            // Background gradient (top-darker → bottom-lighter).
+            let v = 0.18 + 0.45 * (y as f32 / height as f32);
+            let s = 0.55_f32;
+            let (r, g, b) = hsv_to_rgb(hue, s, v);
+            let (r, g, b) = if in_strip {
+                // Window cell: brighter, slightly desaturated.
+                let v2 = (v + 0.20).min(1.0);
+                hsv_to_rgb(hue, s * 0.6, v2)
+            } else {
+                (r, g, b)
+            };
+            rgba.push((r * 255.0) as u8);
+            rgba.push((g * 255.0) as u8);
+            rgba.push((b * 255.0) as u8);
+            rgba.push(255);
+        }
+    }
+    common::contracts::ClusterThumbnail {
+        width,
+        height,
+        rgba_base64: base64_encode(&rgba),
+    }
+}
+
+/// Cheap HSV→RGB helper. Hue in [0,6) (degrees/60), S/V in [0,1].
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h as u8 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (r + m, g + m, b + m)
+}
+
+/// Standard base64 encoder, no_std-style — avoids pulling in a `base64`
+/// crate dep just for thumbnail wire encoding. Standard alphabet, no
+/// line wrap, '=' padding.
+fn base64_encode(input: &[u8]) -> String {
+    const ALPH: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(ALPH[(b0 >> 2) as usize] as char);
+        out.push(ALPH[((b0 << 4 | b1 >> 4) & 0x3F) as usize] as char);
+        if chunk.len() >= 2 {
+            out.push(ALPH[((b1 << 2 | b2 >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() >= 3 {
+            out.push(ALPH[(b2 & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }

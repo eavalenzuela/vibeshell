@@ -156,6 +156,11 @@ enum IpcCommands {
         #[arg(long, default_value = "forward")]
         direction: CycleDirectionArg,
     },
+    /// Fetch the cached thumbnail for a cluster (W1c-25-5). Returns
+    /// `{"type":"thumbnail",...}` with width/height/rgba_base64, or
+    /// `{"type":"thumbnail",null}` when the compositor has nothing
+    /// cached for this cluster yet.
+    GetClusterThumbnail { cluster: ClusterId },
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -375,6 +380,9 @@ fn ipc(command: IpcCommands) -> Result<(), Box<dyn std::error::Error>> {
                 CycleDirectionArg::Backward => CycleDirection::Backward,
             };
             (IpcRequest::CycleCluster { direction: dir }, false)
+        }
+        IpcCommands::GetClusterThumbnail { cluster } => {
+            (IpcRequest::GetClusterThumbnail { cluster }, false)
         }
     };
 
@@ -775,6 +783,17 @@ pub(crate) fn dispatch_ipc_request(
                     "reason": "Subscribe is only supported via the daemon socket; subprocess CLI cannot hold the connection open",
                 })
                 .to_string(),
+            })
+        }
+        IpcRequest::GetClusterThumbnail { cluster } => {
+            // Serve from cache; capture refresh happens on the
+            // ClusterMapped event in the daemon main loop, not on the
+            // read path (we don't want every overlay draw forcing a
+            // re-capture).
+            let thumb = with_state_owner(|owner| owner.cluster_thumbnail(cluster).cloned());
+            Ok(match thumb {
+                Some(t) => IpcResponse::Thumbnail(t),
+                None => IpcResponse::ThumbnailMissing,
             })
         }
         unsupported => Ok(IpcResponse::Error {
@@ -1221,6 +1240,8 @@ fn log_ipc_response(response: &IpcResponse, module: &str, windows: usize, worksp
         IpcResponse::Error { .. } => "error",
         IpcResponse::Subscribed => "subscribed",
         IpcResponse::Event(_) => "event",
+        IpcResponse::Thumbnail(_) => "thumbnail",
+        IpcResponse::ThumbnailMissing => "thumbnail_missing",
     };
 
     info!(

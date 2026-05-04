@@ -280,9 +280,74 @@ fn handle_request(model: &Arc<Mutex<Model>>, request: VibewmRequest) -> (VibewmR
             },
             false,
         ),
+        // Mock returns a procedural placeholder thumbnail (HSV-shifted
+        // by cluster id) so the daemon ↔ overlay wire stays exercisable
+        // in CI without a real renderer. The W1c-25-5 production path
+        // captures from vibewm's GlesRenderer.
+        VibewmRequest::CaptureClusterThumbnail {
+            cluster,
+            max_width,
+            max_height,
+        } => {
+            let w = max_width.clamp(8, 96);
+            let h = max_height.clamp(8, 54);
+            let hue = ((cluster.wrapping_mul(67) % 360) as u8) as f32;
+            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+            for _ in 0..(w * h) {
+                // Cheap HSV→RGB at S=0.5 V=0.7. Just enough variety so
+                // the test pattern visibly differs per cluster id.
+                let h6 = hue / 60.0;
+                let c = 0.7_f32 * 0.5;
+                let x = c * (1.0 - (h6 % 2.0 - 1.0).abs());
+                let m = 0.7_f32 - c;
+                let (r, g, b) = match h6 as u8 {
+                    0 => (c, x, 0.0),
+                    1 => (x, c, 0.0),
+                    2 => (0.0, c, x),
+                    3 => (0.0, x, c),
+                    4 => (x, 0.0, c),
+                    _ => (c, 0.0, x),
+                };
+                rgba.push(((r + m) * 255.0) as u8);
+                rgba.push(((g + m) * 255.0) as u8);
+                rgba.push(((b + m) * 255.0) as u8);
+                rgba.push(255);
+            }
+            let thumb = common::contracts::ClusterThumbnail {
+                width: w,
+                height: h,
+                rgba_base64: base64_encode(&rgba),
+            };
+            (VibewmResponse::Thumbnail(thumb), false)
+        }
         // Subscribe is intercepted upstream.
         VibewmRequest::Subscribe => unreachable!("Subscribe handled in handle_client"),
     }
+}
+
+/// Tiny base64 encoder so the mock binary doesn't pull in a `base64`
+/// crate dep. Standard alphabet, no line wrap, '=' padding.
+fn base64_encode(input: &[u8]) -> String {
+    const ALPH: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(ALPH[(b0 >> 2) as usize] as char);
+        out.push(ALPH[((b0 << 4 | b1 >> 4) & 0x3F) as usize] as char);
+        if chunk.len() >= 2 {
+            out.push(ALPH[((b1 << 2 | b2 >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() >= 3 {
+            out.push(ALPH[(b2 & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 fn send(mut writer: &UnixStream, response: &VibewmResponse) {

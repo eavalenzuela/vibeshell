@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use common::contracts::{ClusterId, WindowId};
+use common::contracts::{ClusterId, ClusterThumbnail, WindowId};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::WmSignal;
@@ -60,6 +60,17 @@ pub enum VibewmRequest {
     Subscribe,
     /// Liveness probe.
     Ping,
+    /// Capture a thumbnail for the cluster (or return the cached one if
+    /// the cluster's content hasn't changed since the last capture).
+    /// Vibewm renders the cluster's mapped windows into an offscreen
+    /// buffer, downsamples to fit `max_size`, and returns RGBA bytes.
+    /// Returns `None` if the cluster isn't tracked or capture failed.
+    /// W1c-25-5 (2026-05-04).
+    CaptureClusterThumbnail {
+        cluster: ClusterId,
+        max_width: u32,
+        max_height: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,11 +78,20 @@ pub enum VibewmRequest {
 pub enum VibewmResponse {
     Ack,
     Pong,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     Snapshot(WmFacts),
-    FocusedWindow { window: Option<WindowId> },
+    FocusedWindow {
+        window: Option<WindowId>,
+    },
     Subscribed,
     Event(VibewmEvent),
+    /// `CaptureClusterThumbnail` reply with the captured RGBA buffer.
+    Thumbnail(ClusterThumbnail),
+    /// `CaptureClusterThumbnail` reply when the cluster is unknown or
+    /// vibewm couldn't capture (no active output, GLES error, etc.).
+    ThumbnailMissing,
 }
 
 /// Events vibewm pushes to subscribed clients.

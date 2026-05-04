@@ -157,6 +157,24 @@ pub struct ZoomTransition {
     pub started_at_ms: u64,
 }
 
+/// Compact RGBA thumbnail of a cluster's rendered state. Captured by the
+/// compositor (vibewm) at cluster-activation time, cached per-cluster,
+/// served on demand to overlay so its W1c-25-1 dive animation can paint
+/// the cluster's actual content as the card grows to fullscreen instead
+/// of an empty shell. JSON-line IPC means we base64-encode the bytes;
+/// PNG might be a smaller wire size for a future optimization but the
+/// raw RGBA is simpler to consume on the GTK Cairo side.
+///
+/// W1c-25-5 (2026-05-04). Sway backend returns `None` (no capture path).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClusterThumbnail {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 4` bytes, RGBA8 row-major top-to-bottom. Encoded
+    /// as base64 for JSON-line transit.
+    pub rgba_base64: String,
+}
+
 /// Transition lifecycle. `Started` is the initial state; `CompositorSettled`
 /// fires once vibewm reports `ClusterMapped`; the daemon clears the
 /// transition shortly after that (or on safety-timeout).
@@ -347,6 +365,13 @@ pub enum IpcRequest {
     /// short-circuits for `ZoomLevel::Overview`) and so overlay would
     /// otherwise miss the undive trigger entirely.
     Subscribe,
+    /// Fetch the latest captured thumbnail for a cluster, or `None` if
+    /// the compositor never captured one. Overlay calls this from its
+    /// cluster-card draw path to paint cluster content under the dive
+    /// animation. W1c-25-5 (2026-05-04).
+    GetClusterThumbnail {
+        cluster: ClusterId,
+    },
 }
 
 /// Events the daemon pushes to subscribed clients on every state mutation.
@@ -395,6 +420,15 @@ pub enum IpcResponse {
     Subscribed,
     /// State mutation happened. Subscribers re-fetch via `GetState`.
     Event(DaemonEventKind),
+    /// `GetClusterThumbnail` reply with a captured thumbnail.
+    /// (Serde's tagged-enum representation can't carry `Option<T>` in a
+    /// newtype variant — the not-found case lives on its own variant
+    /// `ThumbnailMissing` so the wire format stays parseable.)
+    Thumbnail(ClusterThumbnail),
+    /// `GetClusterThumbnail` reply when no capture is cached yet (sway
+    /// backend, or wlroots backend before the first ClusterMapped fires
+    /// for this cluster).
+    ThumbnailMissing,
 }
 
 /// Path to the daemon's Unix socket. Defaults to

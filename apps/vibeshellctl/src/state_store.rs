@@ -145,6 +145,12 @@ pub struct StateOwner {
     /// W1c-25-7 — closes the seam where overlay only learned about
     /// daemon-side mutations on its 1200 ms baseline poll.
     event_subscribers: Vec<UnixStream>,
+    /// Per-cluster thumbnail cache. Refreshed by the daemon main loop
+    /// on `WmSignal::ClusterMapped`; served on demand to overlay via
+    /// `IpcRequest::GetClusterThumbnail`. Empty when no compositor
+    /// captured anything yet (sway backend stays empty forever; wlroots
+    /// backend populates on each cluster activation). W1c-25-5.
+    cluster_thumbnails: BTreeMap<ClusterId, common::contracts::ClusterThumbnail>,
 }
 
 impl StateOwner {
@@ -178,6 +184,7 @@ impl StateOwner {
             drag_origin: None,
             keyboard_move_origin: None,
             event_subscribers: Vec::new(),
+            cluster_thumbnails: BTreeMap::new(),
         }
     }
 
@@ -501,6 +508,9 @@ impl StateOwner {
         }
 
         self.persist_after_mutation(&previous_state);
+        // W1c-25-5: drop thumbnails for clusters no longer present so
+        // overlay doesn't keep painting closed-workspace art.
+        self.prune_thumbnails();
         self.bump_revision(prior, MutationType::SwayIngest, outcome);
     }
 
@@ -1194,6 +1204,33 @@ impl StateOwner {
     /// `IpcResponse::Event(StateChanged)` lines to all listed streams.
     pub fn register_event_subscriber(&mut self, stream: UnixStream) {
         self.event_subscribers.push(stream);
+    }
+
+    /// Cached thumbnail for a cluster (W1c-25-5). `None` until the
+    /// daemon's `ClusterMapped` handler asks the backend to capture.
+    pub fn cluster_thumbnail(
+        &self,
+        cluster: ClusterId,
+    ) -> Option<&common::contracts::ClusterThumbnail> {
+        self.cluster_thumbnails.get(&cluster)
+    }
+
+    /// Insert/replace a cached thumbnail. Caller (daemon main loop)
+    /// fetches via `WmBackend::capture_cluster_thumbnail`.
+    pub fn set_cluster_thumbnail(
+        &mut self,
+        cluster: ClusterId,
+        thumb: common::contracts::ClusterThumbnail,
+    ) {
+        self.cluster_thumbnails.insert(cluster, thumb);
+    }
+
+    /// Drop cached thumbnails for clusters no longer present in state.
+    /// Called from `ingest_facts` so overlay doesn't keep stale
+    /// thumbnails for closed workspaces.
+    pub fn prune_thumbnails(&mut self) {
+        let live: HashSet<ClusterId> = self.canvas_state.clusters.iter().map(|c| c.id).collect();
+        self.cluster_thumbnails.retain(|id, _| live.contains(id));
     }
 
     /// Broadcast a `StateChanged` event to every subscriber, dropping any

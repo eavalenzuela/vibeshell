@@ -82,4 +82,19 @@ pub trait WmBackend: Send {
     /// Spawn a background thread that pumps coalesced workspace/window events
     /// onto a channel. The thread lives as long as the WM connection holds.
     fn spawn_event_stream(&self) -> Result<Receiver<WmSignal>, BackendError>;
+
+    /// Capture a thumbnail for the cluster's current rendered state.
+    /// Returns `Ok(None)` when the backend doesn't support capture (the
+    /// sway backend doesn't — it has no offscreen render path under the
+    /// daemon's control), or when there's nothing cached for this
+    /// cluster yet. The default impl returns `Ok(None)` so backends
+    /// don't have to implement this until they're ready. W1c-25-5.
+    fn capture_cluster_thumbnail(
+        &mut self,
+        _cluster: ClusterId,
+        _max_width: u32,
+        _max_height: u32,
+    ) -> Result<Option<common::contracts::ClusterThumbnail>, BackendError> {
+        Ok(None)
+    }
 }

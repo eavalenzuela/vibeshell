@@ -140,6 +140,23 @@ pub fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
                     owner.advance_transition_on_cluster_mapped(*cluster);
                 }
             });
+            // W1c-25-5: ask the backend for a fresh thumbnail of each
+            // newly-mapped cluster and stash in the state-owner cache.
+            // Sway backend's default impl returns Ok(None) so this is a
+            // cheap no-op there. Sized to overlay's CARD_WIDTH/HEIGHT
+            // (320×140) so we don't waste bytes on a too-big image.
+            for cluster in &mapped_clusters {
+                match backend.capture_cluster_thumbnail(*cluster, 320, 180) {
+                    Ok(Some(thumb)) => with_state_owner(|owner| {
+                        owner.set_cluster_thumbnail(*cluster, thumb);
+                    }),
+                    Ok(None) => {}
+                    Err(e) => warn!(
+                        ?e,
+                        cluster, "daemon: thumbnail capture failed; cache unchanged"
+                    ),
+                }
+            }
         }
         // Always run the staleness sweep — cheap, and catches transitions
         // the compositor never confirmed (sway backend, vibewm crash).

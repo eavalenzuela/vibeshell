@@ -236,6 +236,8 @@ fn fetch_state_via_ipc() -> Option<CanvasState> {
         IpcResponse::Ack
         | IpcResponse::Error { .. }
         | IpcResponse::Subscribed
-        | IpcResponse::Event(_) => None,
+        | IpcResponse::Event(_)
+        | IpcResponse::Thumbnail(_)
+        | IpcResponse::ThumbnailMissing => None,
     }
 }
