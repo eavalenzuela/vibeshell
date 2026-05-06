@@ -323,11 +323,8 @@ fn open_drm_device(
             let enc = drm_device
                 .get_encoder(enc_handle)
                 .map_err(|e| format!("get_encoder: {e}"))?;
-            for crtc in res.filter_crtcs(enc.possible_crtcs()) {
+            if let Some(crtc) = res.filter_crtcs(enc.possible_crtcs()).into_iter().next() {
                 chosen_crtc = Some(crtc);
-                break;
-            }
-            if chosen_crtc.is_some() {
                 break;
             }
         }
