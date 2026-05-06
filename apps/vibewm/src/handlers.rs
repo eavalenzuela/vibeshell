@@ -514,6 +514,45 @@ fn handle_layer_commit(state: &mut Vibewm, surface: &WlSurface) {
             map.arrange();
         }
     }
+
+    // If this layer surface requested keyboard focus (Exclusive or
+    // OnDemand), grab it now. Without this an `exclusive` overlay like
+    // the launcher renders fine but never receives key events. Pick the
+    // topmost layer that wants focus across all outputs (Overlay > Top).
+    use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer as LayerEnum};
+    let mut best: Option<(u8, WlSurface)> = None;
+    for output in state.space.outputs().cloned().collect::<Vec<_>>() {
+        let map = layer_map_for_output(&output);
+        for layer in map.layers() {
+            let cached = layer.cached_state();
+            let wants_focus = matches!(
+                cached.keyboard_interactivity,
+                KeyboardInteractivity::Exclusive | KeyboardInteractivity::OnDemand
+            );
+            if !wants_focus {
+                continue;
+            }
+            let rank = match layer.layer() {
+                LayerEnum::Overlay => 3,
+                LayerEnum::Top => 2,
+                LayerEnum::Bottom => 1,
+                LayerEnum::Background => 0,
+            };
+            let candidate = layer.wl_surface().clone();
+            if best.as_ref().is_none_or(|(r, _)| rank > *r) {
+                best = Some((rank, candidate));
+            }
+        }
+    }
+    if let Some((_, focus_surface)) = best {
+        if let Some(keyboard) = state.seat.get_keyboard() {
+            let current = keyboard.current_focus();
+            if current.as_ref() != Some(&focus_surface) {
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                keyboard.set_focus(state, Some(focus_surface), serial);
+            }
+        }
+    }
 }
 
 // --- XWayland ---

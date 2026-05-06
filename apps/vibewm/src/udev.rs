@@ -560,6 +560,20 @@ fn render_node(state: &mut Vibewm, drm_node: DrmNode) {
             Some(device.output.clone())
         });
     });
+    // Layer surfaces (panel, launcher, notifd, cheatsheet) live in the
+    // per-output LayerMap, not in `Space::elements()`. Without sending
+    // them frame callbacks they commit once at startup and then block
+    // forever waiting for the compositor to ack the frame, so the panel
+    // clock and launcher search box never re-render. Mirror the Space
+    // loop above for the LayerMap.
+    {
+        let layer_map = smithay::desktop::layer_map_for_output(&device.output);
+        for layer in layer_map.layers() {
+            layer.send_frame(&device.output, now, Some(Duration::ZERO), |_, _| {
+                Some(device.output.clone())
+            });
+        }
+    }
 
     // Animated cursors: schedule another render in time for the next
     // frame. Static cursors and the surface-set path return None and the
