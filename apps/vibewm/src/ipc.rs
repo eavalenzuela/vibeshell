@@ -559,7 +559,7 @@ impl Vibewm {
         use smithay::backend::allocator::Fourcc;
         use smithay::backend::renderer::gles::GlesTexture;
         use smithay::backend::renderer::utils::draw_render_elements;
-        use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen, Renderer};
+        use smithay::backend::renderer::{Bind, Color32F, ExportMem, Frame, Offscreen, Renderer};
         use smithay::utils::{Rectangle, Transform};
 
         let udev = self.udev.as_mut()?;
@@ -586,11 +586,9 @@ impl Vibewm {
 
         // Collect elements at the output's native scale; the offscreen
         // frame downscale handles the size reduction during render.
-        let elements: Vec<
-            smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<
-                smithay::backend::renderer::gles::GlesRenderer,
-            >,
-        > = self
+        // `render_elements_for_output` returns SpaceRenderElements (an enum
+        // wrapping WaylandSurfaceRenderElement etc.); let inference bind it.
+        let elements = self
             .space
             .render_elements_for_output(renderer, output, 1.0)
             .ok()?;
