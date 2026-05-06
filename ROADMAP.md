@@ -254,6 +254,26 @@ Features and code paths that exist but are not fully wired into the running syst
 
 ---
 
+### [~] Phase 8 follow-ups (2026-05-05 VM verification)
+
+First end-to-end run of vibewm under the udev backend on a Fedora 44 KVM VM surfaced bugs the host-CI lane can never see (host runs without `--features udev`). Two compositor bugs fixed inline; a handful of dev-ergonomics items deferred.
+
+**Fixed during the session:**
+- [x] **`--features udev` build broken** — `apps/vibewm/src/ipc.rs` (W1c-25-5b thumbnail capture) had three compile errors and a clippy `never_loop` in `apps/vibewm/src/udev.rs:326`, all in feature-gated code that host CI never compiles. Fixed in `1386248` and `054512a`.
+- [x] **Layer surfaces never received frame callbacks** — `udev::render_node` only iterated `Space::elements()` (xdg-shell windows). Layer surfaces (panel, launcher, notifd, cheatsheet) live in the per-output `LayerMap` and so committed once at startup then blocked forever waiting on `wl_surface.frame`. Manifested as a frozen panel clock and a launcher search box that never re-rendered after keystrokes. Fixed in `25b36c3` with a mirror loop over `layer_map_for_output(&output).layers()`.
+- [x] **No layer surface ever got keyboard focus** — even though clients requested `KeyboardInteractivity::Exclusive` (launcher) or `OnDemand` (panel), `WlrLayerShellHandler::new_layer_surface` and `handle_layer_commit` never called `set_focus`. Launcher rendered fine but received zero key events. Fixed in `25b36c3` with a focus-grab pass at the end of `handle_layer_commit` that picks the topmost layer (Overlay > Top > Bottom > Background) requesting Exclusive/OnDemand.
+
+**Open — not blocking but rough edges:**
+- [ ] **Mod+Space spawns duplicate launcher** — the `spawn launcher` action starts a new process every press; with a pre-spawned launcher daemon you get duplicates, without one you get repeated startup latency. Should be a toggle action ("show/hide existing launcher") or the launcher itself should single-instance via a wayland-side check. Same applies to Mod+/ for cheatsheet to a lesser degree (cheatsheet is short-lived and Esc-dismissable, so duplicates are less painful).
+- [ ] **Spawn keybindings need binaries on `PATH`** — `spawn launcher` / `spawn cheatsheet` use bare argv[0], so the dev launch needs `PATH="$PWD/target/debug:$PATH"` prepended. Production install will resolve this naturally; document for dev or have `start-vibeshell-session` extend PATH.
+- [ ] **Add `--features udev` lane to CI** — host `just ci` did not catch the three compile errors or the clippy lint that the VM run found. Either run the udev build/clippy/test in CI (needs libseat, libinput-dev, mesa, etc. in the runner) or add a `just ci-udev` recipe gated to runs that have those, and run it locally before merging anything that touches `vibewm`. Without this, every Phase 10 item is one VM session away from a build break.
+- [ ] **Cleanup of defunct child procs** — repeated `Mod+/` keypresses leave `[cheatsheet] <defunct>` zombies in `ps`. vibewm spawns via `Command::spawn()` and never reaps. Fix with a SIGCHLD handler or `setsid`/double-fork in `spawn_action`.
+- [ ] **Render performance characterization on bare metal** — the VM's virtio-gpu is software-only so 5-15fps tells us nothing about real perf. Need a bare-metal soak before any optimization work to know where the actual bottlenecks are.
+
+**Verified working end-to-end on udev:** libseat seat claim, DRM atomic mode-set, libinput device enumeration, xkb keymap, XWayland init, wayland clients connect, layer surfaces map (panel + launcher + notifd), GTK theming matches STYLE.md, cursor renders + tracks pointer motion, panel clock ticks live, launcher search filters narrow as you type, `Mod+/` and `Mod+Space` keybindings fire and spawn their UIs. Panel status providers (battery 87%, "connected (ethernet)", live clock) all working over the same DBus path the host uses.
+
+---
+
 ### [ ] Phase 10 — Daily-driver readiness
 
 **Theme:** what does it take for vibeshell to replace mutter on a real Ubuntu install? Each tier represents a hard blocker for the tier below it. Don't start Tier 2 until Tier 1 is done — order matters because users hit them in this exact sequence.
